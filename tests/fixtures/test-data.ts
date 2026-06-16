@@ -18,12 +18,6 @@ export const TEST_USER = {
   phone: "447467059973",
   password: "Test@1234",
   confirmPassword: "Test@1234",
-  payment: {
-    cardholderName: "Jhon Smith",
-    cardNumber: "4005519200000004",
-    expiryDate: "01/32",
-    securityCode: "123",
-  },
 };
 
 export type ConditionJourneyType = "nhs" | "private" | "lifestyle";
@@ -206,4 +200,15 @@ export interface ThankYouPreferences {
 
 export const THANK_YOU_PREFERENCES: ThankYouPreferences = {
   action: "My Orders",
+};
+
+export interface PharmacyPreferences {
+  /**
+   * Example: "strachans-one", "strachans-two"
+   */
+  preferredBranch?: string;
+}
+
+export const PHARMACY_PREFERENCES: PharmacyPreferences = {
+  preferredBranch: "strachans-one",
 };

@@ -12,5 +12,4 @@ export interface PharmacySite {
  */
 export const PHARMACY_SITES: PharmacySite[] = [
   { name: "Strachans Pharmacy", baseURL: "http://localhost:4008/", ciSkip: true },
-  { name: "Upton Pharmacy", baseURL: "http://uptonpharmacy-dev.localhost:4007/", ciSkip: true },
 ];

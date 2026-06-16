@@ -1,11 +1,62 @@
 import { Page } from "@playwright/test";
-import { BOOKING_PREFERENCES, BookingPreferences } from "../fixtures/test-data";
+import {
+  BOOKING_PREFERENCES,
+  BookingPreferences,
+  PHARMACY_PREFERENCES,
+  PharmacyPreferences,
+} from "../fixtures/test-data";
 
 export class BookingPage {
   readonly page: Page;
 
   constructor(page: Page) {
     this.page = page;
+  }
+
+  async selectBranch(branchName: string) {
+    const target = branchName.trim().toLowerCase();
+    const currentBranchName = await this.page
+      .locator('p[style*="font-weight: 700"]')
+      .first()
+      .textContent()
+      .catch(() => "");
+
+    if (currentBranchName?.trim().toLowerCase() === target) {
+      console.log(`[BookingPage] Branch "${branchName}" is already selected`);
+      return;
+    }
+
+    const changeBtn = this.page.getByRole("button", { name: "Change" }).first();
+    if (await changeBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
+      console.log(`[BookingPage] Clicking Change button to select branch: ${branchName}`);
+      await changeBtn.click();
+      await this.page.waitForTimeout(800);
+
+      const targetButton = this.page
+        .locator('button')
+        .filter({ hasText: new RegExp(`^${branchName}$`, "i") })
+        .first();
+      const fallbackButton = this.page.locator('button').filter({ hasText: branchName }).first();
+
+      const finalButton = (await targetButton.isVisible().catch(() => false))
+        ? targetButton
+        : fallbackButton;
+
+      if (await finalButton.isVisible().catch(() => false)) {
+        console.log(`[BookingPage] Selecting branch: ${branchName}`);
+        await finalButton.click();
+        await this.page.waitForTimeout(1000);
+      } else {
+        console.log(`[BookingPage] Branch option "${branchName}" not found`);
+      }
+    } else {
+      console.log("[BookingPage] Change branch button not visible - skipping branch selection");
+    }
+  }
+
+  async selectPreferredBranch(prefs: PharmacyPreferences = PHARMACY_PREFERENCES) {
+    if (!prefs.preferredBranch) return;
+    await this.selectBranch(prefs.preferredBranch);
   }
 
   /**
@@ -755,12 +806,17 @@ export class BookingPage {
 
   /**
    * Complete the full booking flow using preferences from test-data.ts:
-   *   1. Select preferred session type
-   *   2. Try instant "Book Now" → fall back to date + slot selection
-   *   3. Handle any intermediate "Continue" state
+   *   1. Switch pharmacy branch if needed
+   *   2. Select preferred session type
+   *   3. Try instant "Book Now" → fall back to date + slot selection
+   *   4. Handle any intermediate "Continue" state
    */
-  async completeBooking(prefs: BookingPreferences = BOOKING_PREFERENCES) {
+  async completeBooking(
+    prefs: BookingPreferences = BOOKING_PREFERENCES,
+    pharmacyPrefs: PharmacyPreferences = PHARMACY_PREFERENCES,
+  ) {
     await this.waitForPage();
+    await this.selectPreferredBranch(pharmacyPrefs);
     await this.selectPreferredSessionType(prefs);
 
     // Brief pause for any dynamic content to load after session type selection

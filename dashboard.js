@@ -113,9 +113,7 @@ function readTestData() {
     return m ? m[1] === "true" : false;
   };
 
-  // Active condition — find uncommented journeyType line
-  const activeMatch = src.match(/journeyType:\s*"(nhs|private|lifestyle)"\s+as\s+ConditionJourneyType,?\s*\n(?!\s*\/\/)/);
-  // Simpler: find the uncommented journeyType line inside ACTIVE_CONDITION block
+  // Active condition — find the uncommented journeyType line inside ACTIVE_CONDITION
   const activeCondBlock = src.match(/ACTIVE_CONDITION\s*=\s*\{([^}]+)\}/s);
   let journeyType = "nhs";
   if (activeCondBlock) {
@@ -141,12 +139,6 @@ function readTestData() {
       dobMonth: get("month"),
       dobYear: get("year"),
     },
-    payment: {
-      cardholderName: get("cardholderName"),
-      cardNumber: get("cardNumber"),
-      expiryDate: get("expiryDate"),
-      securityCode: get("securityCode"),
-    },
     condition: { journeyType },
     booking: {
       appointmentType: get("appointmentType"),
@@ -156,6 +148,9 @@ function readTestData() {
       preferredTime: get("preferredTime"),
       autoMoveToNextDate: getBool("autoMoveToNextDate"),
       maxDateAttempts: getNum("maxDateAttempts"),
+    },
+    pharmacy: {
+      preferredBranch: get("preferredBranch"),
     },
   };
 }
@@ -194,12 +189,6 @@ function writeTestData(data) {
   src = src.replace(/(iso:\s*)"[^"]*"/, `$1"${iso}"`);
   src = src.replace(/(display:\s*)"[^"]*"/, `$1"${display}"`);
 
-  const p = data.payment;
-  setStr("cardholderName", p.cardholderName);
-  setStr("cardNumber", p.cardNumber);
-  setStr("expiryDate", p.expiryDate);
-  setStr("securityCode", p.securityCode);
-
   const b = data.booking;
   setStr("appointmentType", b.appointmentType);
   setBool("useNextAvailableSlot", b.useNextAvailableSlot);
@@ -208,6 +197,9 @@ function writeTestData(data) {
   setStr("preferredTime", b.preferredTime || "");
   setBool("autoMoveToNextDate", b.autoMoveToNextDate);
   setNum("maxDateAttempts", b.maxDateAttempts);
+
+  const ph = data.pharmacy || {};
+  setStr("preferredBranch", ph.preferredBranch || "");
 
   // Active condition — comment out all, uncomment chosen
   const jt = data.condition.journeyType;
@@ -321,101 +313,8 @@ app.get("/api/sanity-conditions", async (req, res) => {
   try {
     const fetchFunc = typeof fetch !== "undefined" ? fetch : (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
     
-    let websiteConditions = [];
-    const siteUrl = req.query.url;
-    
-    if (siteUrl) {
-      try {
-        const htmlRes = await fetchFunc(siteUrl);
-        const html = await htmlRes.text();
-        
-        // 1. Find all H2 headings with their indexes to determine sections
-        const h2Matches = [];
-        const h2Re = /<h2[^>]*>([\s\S]*?)<\/h2>/gi;
-        let m;
-        while ((m = h2Re.exec(html))) {
-          const text = m[1].replace(/<[^>]*>/g, "").trim().replace(/\s+/g, " ");
-          h2Matches.push({ text, index: m.index });
-        }
-        
-        // 2. Find all condition links with their inner HTML and indexes
-        const linkRe = /<a\s+[^>]*href="\/conditions\/([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
-        while ((m = linkRe.exec(html))) {
-          const slug = m[1];
-          const innerHTML = m[2];
-          const matchIndex = m.index;
-          
-          // Try to find a heading or title text inside the card
-          const titleM = innerHTML.match(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/i) || innerHTML.match(/<span[^>]*>([\s\S]*?)<\/span>/i);
-          let title = titleM ? titleM[1] : "";
-          title = title.replace(/<[^>]*>/g, "").trim().replace(/\s+/g, " ");
-          
-          // Decode HTML entities
-          title = title
-            .replace(/&amp;/g, "&")
-            .replace(/&lt;/g, "<")
-            .replace(/&gt;/g, ">")
-            .replace(/&quot;/g, "\"")
-            .replace(/&#x27;/g, "'")
-            .replace(/&#x2F;/g, "/")
-            .replace(/&#39;/g, "'");
-            
-          if (!title) {
-            // Fallback: title from slug
-            title = slug
-              .replace(/-nhs$/i, "")
-              .replace(/-private$/i, "")
-              .split("-")
-              .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-              .join(" ");
-          }
-          
-          // 3. Determine services category (NHS vs Private) from H2 sections
-          let services = null;
-          // Find the closest preceding H2
-          let closestH2 = null;
-          for (const h2 of h2Matches) {
-            if (h2.index < matchIndex) {
-              closestH2 = h2;
-            } else {
-              break;
-            }
-          }
-          
-          if (closestH2) {
-            const h2Text = closestH2.text.toLowerCase();
-            if (h2Text.includes("free") || h2Text.includes("nhs")) {
-              services = "NHS";
-            } else if (h2Text.includes("private")) {
-              services = "Private";
-            }
-          }
-          
-          // Fallback check on slug name if headings didn't match or categorize it
-          if (!services) {
-            if (slug.toLowerCase().endsWith("-nhs")) {
-              services = "NHS";
-            } else if (slug.toLowerCase().endsWith("-private")) {
-              services = "Private";
-            } else if (slug.toLowerCase().includes("nhs")) {
-              services = "NHS";
-            } else if (slug.toLowerCase().includes("private")) {
-              services = "Private";
-            } else {
-              services = "NHS"; // Safe default
-            }
-          }
-          
-          websiteConditions.push({ slug, title, services });
-        }
-      } catch (err) {
-        console.error("Failed to fetch site HTML for slug extraction:", err.message);
-      }
-    }
-
-    // Now query Sanity conditions
-    const query = encodeURIComponent(`*[_type == "singleCondition" && conditionLogStatus == "active"]{ title, conditionId, "slug": conditionSlug.current, services }`);
-    const url = `https://sorypy3x.api.sanity.io/v2024-10-28/data/query/dev?query=${query}`;
+    // Query Sanity conditions from the requested endpoint
+    const url = "https://gnx5auvv.api.sanity.io/v2026-06-15/data/query/dev?query=*%5B_type+%3D%3D+%22singleCondition%22%5D%7B%0A++title%2C%0A++%22conditionSlug%22%3A+conditionSlug.current%0A%7D&perspective=drafts";
     
     let sanityConditions = [];
     try {
@@ -430,48 +329,16 @@ app.get("/api/sanity-conditions", async (req, res) => {
       console.error("Failed to fetch Sanity conditions:", err.message);
     }
     
-    // Merge websiteConditions and sanityConditions.
-    // If a siteUrl was fetched, we use websiteConditions as the base list (since we only want conditions available on the website)
-    // and enrich it with Sanity titles/services/conditionIds if matched.
-    // If siteUrl was NOT fetched or websiteConditions is empty, we fall back to returning sanityConditions.
-    let result = [];
-    if (siteUrl && websiteConditions.length > 0) {
-      const sanityMap = new Map();
-      for (const sc of sanityConditions) {
-        if (sc.slug) {
-          sanityMap.set(sc.slug, sc);
-        }
-      }
-      
-      const seenSlugs = new Set();
-      for (const wc of websiteConditions) {
-        if (seenSlugs.has(wc.slug)) continue;
-        seenSlugs.add(wc.slug);
-        
-        const sc = sanityMap.get(wc.slug);
-        if (sc) {
-          result.push({
-            title: sc.title || wc.title,
-            slug: wc.slug,
-            services: sc.services || wc.services,
-            conditionId: sc.conditionId
-          });
-        } else {
-          result.push({
-            title: wc.title,
-            slug: wc.slug,
-            services: wc.services
-          });
-        }
-      }
-    } else {
-      // Fallback: use all sanity conditions that have a slug
-      const seenSlugs = new Set();
-      for (const sc of sanityConditions) {
-        if (sc.slug && !seenSlugs.has(sc.slug)) {
-          seenSlugs.add(sc.slug);
-          result.push(sc);
-        }
+    // Return only Sanity conditions with a slug
+    const result = [];
+    const seenSlugs = new Set();
+    for (const sc of sanityConditions) {
+      if (sc.conditionSlug && !seenSlugs.has(sc.conditionSlug)) {
+        seenSlugs.add(sc.conditionSlug);
+        result.push({
+          title: sc.title,
+          slug: sc.conditionSlug,
+        });
       }
     }
     

@@ -1555,7 +1555,7 @@
               </div>
             </div>
 
-            <!-- Payment -->
+            <!-- Pharmacy -->
             <div
               class="td-section collapsed"
               style="
@@ -1577,7 +1577,7 @@
                   cursor: pointer;
                 "
               >
-                💳 Payment Card
+                🏥 Pharmacy Preference
               </div>
               <div
                 class="td-section-body"
@@ -1589,25 +1589,12 @@
                 "
               >
                 <div class="td-field">
-                  <label>Cardholder Name</label
-                  ><input type="text" name="cardholderName" class="td-input" />
-                </div>
-                <div class="td-field">
-                  <label>Card Number</label
-                  ><input type="text" name="cardNumber" class="td-input" />
-                </div>
-                <div class="td-field">
-                  <label>Expiry Date</label
-                  ><input
-                    type="text"
-                    name="expiryDate"
-                    class="td-input"
-                    placeholder="01/26"
-                  />
-                </div>
-                <div class="td-field">
-                  <label>Security Code</label
-                  ><input type="text" name="securityCode" class="td-input" />
+                  <label>Preferred Branch</label>
+                  <select name="preferredBranch" class="td-select">
+                    <option value="">Select branch…</option>
+                    <option value="strachans-one">strachans-one</option>
+                    <option value="strachans-two">strachans-two</option>
+                  </select>
                 </div>
               </div>
             </div>
@@ -1838,12 +1825,7 @@
           allTests = await res.json();
 
           try {
-            let sanityUrl = "/api/sanity-conditions";
-            const pObj = allPharmacies.find(p => p.name === pharmacyName);
-            if (pObj && pObj.baseURL) {
-              sanityUrl += `?url=${encodeURIComponent(pObj.baseURL)}`;
-            }
-            const sanityRes = await fetch(sanityUrl);
+            const sanityRes = await fetch("/api/sanity-conditions");
             const sanityData = await sanityRes.json();
             if (sanityData.result) {
               window.sanityConditions = sanityData.result;
@@ -1895,37 +1877,18 @@
         });
 
         if (window.sanityConditions) {
-          const nhs = window.sanityConditions.filter(
-            (c) => c.services && c.services.toLowerCase() === "nhs",
-          );
-          const priv = window.sanityConditions.filter(
-            (c) => c.services && c.services.toLowerCase() === "private",
-          );
+          const sanityList = window.sanityConditions.filter((c) => c.slug);
 
-          if (nhs.length || priv.length) {
+          if (sanityList.length) {
             byFile["Sanity Conditions"] = {};
-            if (nhs.length) {
-              byFile["Sanity Conditions"]["NHS Conditions"] = nhs.map((c) => ({
-                title: c.title,
-                fullTitle:
-                  "complete conditions flow: Booking Page → signup → confirm page",
-                file: "tests/e2e/condition-flow.spec.ts",
-                _testName: c.title,
-                _slug: c.slug,
-              }));
-            }
-            if (priv.length) {
-              byFile["Sanity Conditions"]["Private Conditions"] = priv.map(
-                (c) => ({
-                  title: c.title,
-                  fullTitle:
-                    "complete conditions flow: Booking Page → signup → confirm page",
-                  file: "tests/e2e/condition-flow.spec.ts",
-                  _testName: c.title,
-                  _slug: c.slug,
-                }),
-              );
-            }
+            byFile["Sanity Conditions"]["All Conditions"] = sanityList.map((c) => ({
+              title: c.title,
+              fullTitle:
+                "complete conditions flow: Booking Page → signup → confirm page",
+              file: "tests/e2e/condition-flow.spec.ts",
+              _testName: c.title,
+              _slug: c.slug,
+            }));
           }
         }
 
@@ -2328,7 +2291,7 @@
           currentTestData = await res.json();
           const u = currentTestData.user || {};
           const b = currentTestData.booking || {};
-          const p = currentTestData.payment || {};
+          const ph = currentTestData.pharmacy || {};
 
           testdataForm.elements["firstName"].value = u.firstName || "";
           testdataForm.elements["lastName"].value = u.lastName || "";
@@ -2347,12 +2310,8 @@
             !!b.useNextAvailableSlot;
           testdataForm.elements["preferredDate"].value = b.preferredDate || "";
           testdataForm.elements["preferredTime"].value = b.preferredTime || "";
-
-          testdataForm.elements["cardholderName"].value =
-            p.cardholderName || "";
-          testdataForm.elements["cardNumber"].value = p.cardNumber || "";
-          testdataForm.elements["expiryDate"].value = p.expiryDate || "";
-          testdataForm.elements["securityCode"].value = p.securityCode || "";
+          testdataForm.elements["preferredBranch"].value =
+            ph.preferredBranch || "";
         } catch (e) {}
       }
 
@@ -2361,7 +2320,7 @@
         document.getElementById("save-status").textContent = "Saving...";
         const u = currentTestData.user || {};
         const b = currentTestData.booking || {};
-        const p = currentTestData.payment || {};
+        const ph = currentTestData.pharmacy || {};
 
         u.firstName = testdataForm.elements["firstName"].value;
         u.lastName = testdataForm.elements["lastName"].value;
@@ -2379,15 +2338,11 @@
           testdataForm.elements["useNextAvailableSlot"].checked;
         b.preferredDate = testdataForm.elements["preferredDate"].value;
         b.preferredTime = testdataForm.elements["preferredTime"].value;
-
-        p.cardholderName = testdataForm.elements["cardholderName"].value;
-        p.cardNumber = testdataForm.elements["cardNumber"].value;
-        p.expiryDate = testdataForm.elements["expiryDate"].value;
-        p.securityCode = testdataForm.elements["securityCode"].value;
+        ph.preferredBranch = testdataForm.elements["preferredBranch"].value;
 
         currentTestData.user = u;
         currentTestData.booking = b;
-        currentTestData.payment = p;
+        currentTestData.pharmacy = ph;
 
         try {
           const res = await fetch("/api/test-data", {

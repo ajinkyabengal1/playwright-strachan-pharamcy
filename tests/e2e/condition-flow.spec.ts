@@ -5,7 +5,7 @@ import {
   CART_PREFERENCES,
   DRUG_SELECTION_PREFERENCES,
   SHIPPING_ADDRESS_PREFERENCES,
-  THANK_YOU_PREFERENCES,
+  THANK_YOU_PREFERENCES, PHARMACY_PREFERENCES,
   getActiveConditionName,
 } from "../fixtures/test-data";
 import { ConditionsPage } from "../page-objects/ConditionsPage";
@@ -653,7 +653,7 @@ test.describe("Conditions flow", () => {
 
           case "appointment_booking": {
             console.log("→ Handling booking step");
-            await booking.completeBooking();
+            await booking.completeBooking(undefined, PHARMACY_PREFERENCES);
             break;
           }
 
