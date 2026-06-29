@@ -2,6 +2,20 @@ const express = require("express");
 const { spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
+const https = require("https");
+
+function httpGetJson(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, (res) => {
+      let raw = "";
+      res.on("data", (c) => (raw += c));
+      res.on("end", () => {
+        try { resolve(JSON.parse(raw)); }
+        catch (e) { reject(new Error(`JSON parse error from ${url}: ${e.message}`)); }
+      });
+    }).on("error", reject);
+  });
+}
 
 const app = express();
 app.use(express.json());
@@ -17,7 +31,7 @@ const PHARMACIES_PATH = path.join(__dirname, "tests/fixtures/pharmacies.ts");
 function readPharmacies() {
   const src = fs.readFileSync(PHARMACIES_PATH, "utf8");
   const list = [];
-  const re = /\{\s*name:\s*"([^"]+)"\s*,\s*baseURL:\s*"([^"]+)"(?:\s*,\s*ciSkip:\s*(true|false))?\s*\}/g;
+  const re = /\{\s*name:\s*"([^"]+)"\s*,\s*baseURL:\s*"([^"]+)"(?:\s*,\s*ciSkip:\s*(true|false))?,?\s*\}/g;
   let m;
   while ((m = re.exec(src))) {
     list.push({ name: m[1], baseURL: m[2], ciSkip: m[3] === "true" });
@@ -84,6 +98,23 @@ function listTests() {
     });
   });
 }
+
+// ── Per-pharmacy Sanity configuration ─────────────────────────────────────────
+// Add an entry here for each pharmacy website. The key is the hostname.
+// For `usePharmacyNameFilter: true`, conditions are filtered by matching
+// pharmacy branch names in Sanity (using the `corporateId` field).
+// Otherwise, `query` is executed directly against that pharmacy's Sanity project.
+const PHARMACY_SANITY_CONFIGS = {
+  "strachans-pharamcy.healthya.co.uk": {
+    sanityBase: "https://gnx5auvv.api.sanity.io/v2026-06-15/data/query/dev",
+    usePharmacyNameFilter: true,
+    keyword: "strachans",
+  },
+  "health-check-pharmacy.vercel.app": {
+    sanityBase: "https://fsri74r8.api.sanity.io/v2026-06-29/data/query/dev",
+    query: `*[_type == "singleCondition" && conditionLogStatus == "active" && !(_id in path("drafts.**"))]{title, "conditionSlug": conditionSlug.current}`,
+  },
+};
 
 // ── Flow configs (mirrors flow-configs.ts — JS copy for dashboard) ────────────
 const FLOW_CONFIGS = [
@@ -311,37 +342,56 @@ app.get("/api/test-data", (req, res) => {
 
 app.get("/api/sanity-conditions", async (req, res) => {
   try {
-    const fetchFunc = typeof fetch !== "undefined" ? fetch : (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
-    
-    // Query Sanity conditions from the requested endpoint
-    const url = "https://gnx5auvv.api.sanity.io/v2026-06-15/data/query/dev?query=*%5B_type+%3D%3D+%22singleCondition%22%5D%7B%0A++title%2C%0A++%22conditionSlug%22%3A+conditionSlug.current%0A%7D&perspective=drafts";
-    
+    const baseURL = req.query.baseURL;
     let sanityConditions = [];
-    try {
-      const response = await fetchFunc(url);
-      if (response.ok) {
-        const data = await response.json();
-        if (data.result) {
-          sanityConditions = data.result;
-        }
+
+    if (baseURL) {
+      let hostname;
+      try { hostname = new URL(baseURL).hostname; } catch (_) {}
+
+      const config = hostname && PHARMACY_SANITY_CONFIGS[hostname];
+      if (!config) return res.json({ result: [] });
+
+      if (config.usePharmacyNameFilter) {
+        // Two-step: resolve corporateIds from Sanity pharmacy docs, then filter conditions
+        const pharmData = await httpGetJson(
+          `${config.sanityBase}?query=${encodeURIComponent('*[_type == "pharmacies"]{name, corporateId}')}&perspective=drafts`
+        );
+        const ids = (pharmData.result || [])
+          .filter((p) => p.name && p.name.toLowerCase().includes(config.keyword || ""))
+          .map((p) => p.corporateId);
+
+        if (ids.length === 0) return res.json({ result: [] });
+
+        const condQuery = `*[_type == "singleCondition" && corporateId in [${ids.join(",")}]]{title, "conditionSlug": conditionSlug.current}`;
+        const condData = await httpGetJson(`${config.sanityBase}?query=${encodeURIComponent(condQuery)}&perspective=drafts`);
+        sanityConditions = condData.result || [];
+      } else {
+        // Direct query against this pharmacy's own Sanity project
+        const condData = await httpGetJson(
+          `${config.sanityBase}?query=${encodeURIComponent(config.query)}&perspective=drafts`
+        );
+        sanityConditions = condData.result || [];
       }
-    } catch (err) {
-      console.error("Failed to fetch Sanity conditions:", err.message);
+    } else {
+      // No baseURL — fall back to all conditions from default project
+      const fallbackQuery = `*[_type == "singleCondition"]{title, "conditionSlug": conditionSlug.current}`;
+      const condData = await httpGetJson(
+        `https://gnx5auvv.api.sanity.io/v2026-06-15/data/query/dev?query=${encodeURIComponent(fallbackQuery)}&perspective=drafts`
+      );
+      sanityConditions = condData.result || [];
     }
-    
-    // Return only Sanity conditions with a slug
+
+    // Deduplicate by slug
     const result = [];
     const seenSlugs = new Set();
     for (const sc of sanityConditions) {
       if (sc.conditionSlug && !seenSlugs.has(sc.conditionSlug)) {
         seenSlugs.add(sc.conditionSlug);
-        result.push({
-          title: sc.title,
-          slug: sc.conditionSlug,
-        });
+        result.push({ title: sc.title, slug: sc.conditionSlug });
       }
     }
-    
+
     res.json({ result });
   } catch (e) {
     res.status(500).json({ error: e.message });

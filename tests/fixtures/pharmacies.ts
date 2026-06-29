@@ -11,5 +11,14 @@ export interface PharmacySite {
  * in `playwright test --ui` and selectable via `--project="<name>"` on the CLI.
  */
 export const PHARMACY_SITES: PharmacySite[] = [
-  { name: "Strachans Pharmacy", baseURL: "http://localhost:4008/", ciSkip: true },
+  {
+    name: "Strachans Pharmacy",
+    baseURL: "https://strachans-pharamcy.healthya.co.uk/",
+    ciSkip: true,
+  },
+  {
+    name: "Health Check Pharmacy",
+    baseURL: "https://health-check-pharmacy.vercel.app/",
+    ciSkip: true,
+  },
 ];

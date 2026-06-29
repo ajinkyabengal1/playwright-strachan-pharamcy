@@ -1808,11 +1808,12 @@
           return;
         }
         currentPharmacy = name;
-        loadTests(name);
+        const pharmacyData = allPharmacies.find((p) => p.name === name);
+        loadTests(name, pharmacyData?.baseURL);
       });
 
       // ── Test list load ─────────────────────────────────────────────────────────
-      async function loadTests(pharmacyName) {
+      async function loadTests(pharmacyName, baseURL) {
         treeEl.innerHTML =
           '<div id="loading"><div class="spinner"></div>Loading tests…</div>';
         btnRunAll.disabled = true;
@@ -1824,8 +1825,11 @@
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           allTests = await res.json();
 
+          window.sanityConditions = [];
           try {
-            const sanityRes = await fetch("/api/sanity-conditions");
+            const conditionsParams = new URLSearchParams();
+            if (baseURL) conditionsParams.set("baseURL", baseURL);
+            const sanityRes = await fetch(`/api/sanity-conditions?${conditionsParams}`);
             const sanityData = await sanityRes.json();
             if (sanityData.result) {
               window.sanityConditions = sanityData.result;
