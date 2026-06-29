@@ -371,7 +371,6 @@ test.describe("Conditions flow", () => {
     // ─── Step 1: Resolve condition href + pharmacy slug ─────────────────────
     let conditionHref: string;
     let pharmacySlug: string;
-    let usedFallback = false;
 
     const conditionDetailPath = process.env.CONDITION_DETAIL_PATH;
 
@@ -390,13 +389,14 @@ test.describe("Conditions flow", () => {
         try {
           conditionHref = await conditionsPage.getConditionHrefBySlug(
             process.env.CONDITION_SLUG,
+            PHARMACY_PREFERENCES.preferredBranch,
           );
         } catch (e) {
-          console.log(
-            `Link for ${process.env.CONDITION_SLUG} not found on homepage. Falling back to direct URL path...`,
+          test.skip(
+            true,
+            `Condition "${process.env.CONDITION_SLUG}" is not listed on this pharmacy's website — skipping.`,
           );
-          conditionHref = `/conditions/${process.env.CONDITION_SLUG}`;
-          usedFallback = true;
+          return;
         }
       } else {
         conditionHref = await conditionsPage.getConditionHrefByName(
@@ -424,15 +424,7 @@ test.describe("Conditions flow", () => {
         ]);
       }
 
-      // Click the condition card or navigate directly if fallback was used
-      if (usedFallback) {
-        const detailUrl = conditionHref.startsWith("http")
-          ? conditionHref
-          : `${baseUrl}${conditionHref}`;
-        await page.goto(detailUrl);
-      } else {
-        await conditionsPage.clickConditionByHref(conditionHref);
-      }
+      await conditionsPage.clickConditionByHref(conditionHref);
       await detailPage.waitForDetailPage();
     });
 

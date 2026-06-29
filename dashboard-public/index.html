@@ -1590,10 +1590,8 @@
               >
                 <div class="td-field">
                   <label>Preferred Branch</label>
-                  <select name="preferredBranch" class="td-select">
+                  <select name="preferredBranch" id="branchSelect" class="td-select">
                     <option value="">Select branch…</option>
-                    <option value="strachans-one">strachans-one</option>
-                    <option value="strachans-two">strachans-two</option>
                   </select>
                 </div>
               </div>
@@ -1799,6 +1797,25 @@
         }
       }
 
+      async function loadBranches(baseURL, preselect) {
+        const sel = document.getElementById("branchSelect");
+        sel.innerHTML = '<option value="">Select branch…</option>';
+        if (!baseURL) return;
+        try {
+          const res = await fetch(`/api/branches?baseURL=${encodeURIComponent(baseURL)}`);
+          const data = await res.json();
+          (data.branches || []).forEach(({ slug, name }) => {
+            const opt = document.createElement("option");
+            opt.value = slug;
+            opt.textContent = name;
+            if (slug === preselect) opt.selected = true;
+            sel.appendChild(opt);
+          });
+        } catch (e) {
+          console.warn("Failed to load branches", e);
+        }
+      }
+
       pharmacySel.addEventListener("change", () => {
         const name = pharmacySel.value;
         if (!name) {
@@ -1809,6 +1826,8 @@
         }
         currentPharmacy = name;
         const pharmacyData = allPharmacies.find((p) => p.name === name);
+        const savedBranch = currentTestData?.pharmacy?.preferredBranch || "";
+        loadBranches(pharmacyData?.baseURL, savedBranch);
         loadTests(name, pharmacyData?.baseURL);
       });
 
@@ -2314,8 +2333,9 @@
             !!b.useNextAvailableSlot;
           testdataForm.elements["preferredDate"].value = b.preferredDate || "";
           testdataForm.elements["preferredTime"].value = b.preferredTime || "";
-          testdataForm.elements["preferredBranch"].value =
-            ph.preferredBranch || "";
+          const savedBranch = ph.preferredBranch || "";
+          const pharmacyData = allPharmacies.find((p) => p.name === currentPharmacy);
+          await loadBranches(pharmacyData?.baseURL, savedBranch);
         } catch (e) {}
       }
 

@@ -203,12 +203,9 @@ export const THANK_YOU_PREFERENCES: ThankYouPreferences = {
 };
 
 export interface PharmacyPreferences {
-  /**
-   * Example: "strachans-one", "strachans-two"
-   */
   preferredBranch?: string;
 }
 
 export const PHARMACY_PREFERENCES: PharmacyPreferences = {
-  preferredBranch: "strachans-one",
+  preferredBranch: "strachans-chemist-bury",
 };

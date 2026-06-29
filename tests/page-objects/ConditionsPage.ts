@@ -111,17 +111,44 @@ export class ConditionsPage {
    * Returns the href of the condition matching the sanity slug.
    * Cleans up -nhs, -private, etc. from the dashboard slug to match frontend URLs.
    */
-  async getConditionHrefBySlug(slug: string): Promise<string> {
+  async getConditionHrefBySlug(slug: string, preferredBranch?: string): Promise<string> {
     const cleanSlug = slug.replace("-nhs", "").replace("-private", "").replace("-clinical", "");
+    const typeSuffix = slug.match(/-(nhs|private|clinical)$/)?.[1] ?? "";
     const links = this.getAllConditionLinks();
     const count = await links.count();
 
+    const hrefs: string[] = [];
     for (let i = 0; i < count; i++) {
       const href = await links.nth(i).getAttribute("href");
-      if (href && href.includes(cleanSlug)) {
-        return href;
-      }
+      if (href) hrefs.push(href);
     }
+
+    const findInSet = (candidates: string[]): string | undefined => {
+      // Exact clean slug match
+      const exact = candidates.find((h) => h.includes(cleanSlug));
+      if (exact) return exact;
+
+      // Progressively shorter prefix (handles sites like Strachans with abbreviated slugs)
+      const parts = cleanSlug.split("-");
+      for (let len = parts.length - 1; len >= 1; len--) {
+        const prefix = parts.slice(0, len).join("-");
+        const match = candidates.find(
+          (h) => h.includes(`/${prefix}`) && (!typeSuffix || h.includes(typeSuffix)),
+        );
+        if (match) return match;
+      }
+      return undefined;
+    };
+
+    // Try preferred branch first, fall back to any branch
+    if (preferredBranch) {
+      const branchHrefs = hrefs.filter((h) => h.includes(`/${preferredBranch}/`));
+      const preferred = findInSet(branchHrefs);
+      if (preferred) return preferred;
+    }
+
+    const any = findInSet(hrefs);
+    if (any) return any;
 
     throw new Error(`Condition matching slug "${slug}" (cleaned to "${cleanSlug}") not found on page`);
   }

@@ -398,6 +398,42 @@ app.get("/api/sanity-conditions", async (req, res) => {
   }
 });
 
+app.get("/api/branches", async (req, res) => {
+  try {
+    const baseURL = req.query.baseURL;
+    if (!baseURL) return res.json({ branches: [] });
+
+    const html = await new Promise((resolve, reject) => {
+      https.get(baseURL, (r) => {
+        let raw = "";
+        r.on("data", (c) => (raw += c));
+        r.on("end", () => resolve(raw));
+      }).on("error", reject);
+    });
+
+    const seen = new Set();
+    const branches = [];
+    const re = /href="\/([^/"]+)\/conditions\/[^"]+"/g;
+    let m;
+    while ((m = re.exec(html)) !== null) {
+      const slug = m[1];
+      if (!seen.has(slug)) {
+        seen.add(slug);
+        const name = slug
+          .split("-")
+          .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+          .join(" ")
+          .replace(/\bChemist\b/, "Chemist -");
+        branches.push({ slug, name });
+      }
+    }
+
+    res.json({ branches });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post("/api/test-data", (req, res) => {
   try {
     writeTestData(req.body);
