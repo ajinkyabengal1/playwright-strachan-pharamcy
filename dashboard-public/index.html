@@ -331,13 +331,31 @@
       /* ── Sidebar ─────────────────────────────────────────────────────────── */
       #sidebar {
         width: var(--sidebar-w);
-        min-width: var(--sidebar-w);
+        min-width: 180px;
+        max-width: 520px;
         height: 100%;
         background: var(--clr-sidebar);
-        border-right: 1px solid var(--clr-border);
+        border-right: none;
         display: flex;
         flex-direction: column;
         overflow: hidden;
+        flex-shrink: 0;
+      }
+
+      /* Drag handle between sidebar and main content */
+      #sidebar-resizer {
+        width: 5px;
+        height: 100%;
+        cursor: col-resize;
+        flex-shrink: 0;
+        background: var(--clr-border);
+        transition: background 0.15s;
+        position: relative;
+        z-index: 10;
+      }
+      #sidebar-resizer:hover,
+      #sidebar-resizer.dragging {
+        background: var(--clr-accent);
       }
       #search-wrap {
         padding: 10px 12px;
@@ -500,26 +518,170 @@
         background: var(--clr-skip);
       }
 
-      .tree-test .test-name {
-        flex: 1;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
       .tree-test .run-test-btn {
-        opacity: 0;
+        opacity: 1;
         font-size: 10px;
-        padding: 1px 6px;
-        border-radius: 3px;
+        padding: 2px 7px;
+        border-radius: 4px;
         border: 1px solid var(--clr-accent);
         color: var(--clr-accent);
         background: transparent;
         cursor: pointer;
-        transition: opacity 0.15s;
+        transition: background 0.15s;
         flex-shrink: 0;
       }
-      .tree-test:hover .run-test-btn {
+      .tree-test .run-test-btn:hover {
+        background: var(--clr-accent);
+        color: #fff;
+      }
+
+      /* ── TC card layout (matches pharmacy-e2e-tests style) ─────────────────── */
+      .tree-test {
+        padding: 0;
+        margin: 2px 6px;
+        border-radius: 8px;
+        border: 1px solid transparent;
+        cursor: default;
+      }
+      .tree-test:hover { border-color: var(--clr-border); background: var(--clr-hover); }
+      .tree-test.active { border-color: var(--clr-accent); background: rgba(124,106,247,0.08); }
+
+      .tc-main-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 7px 10px 7px 10px;
+      }
+
+      /* TC-### badge */
+      .tc-id {
+        font-size: 10px;
+        font-weight: 700;
+        color: #fff;
+        background: var(--clr-accent);
+        border-radius: 5px;
+        padding: 2px 6px;
+        white-space: nowrap;
+        flex-shrink: 0;
+        letter-spacing: 0.03em;
+      }
+      /* status dot replaces TC badge for non-condition tests */
+      .test-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        flex-shrink: 0;
+        background: #ccc;
+        transition: background 0.3s;
+      }
+      .test-dot.running { background: var(--clr-running); animation: pulse 1s infinite; }
+      .test-dot.pass    { background: var(--clr-pass); }
+      .test-dot.fail    { background: var(--clr-fail); }
+      .test-dot.skip    { background: var(--clr-skip); }
+
+      /* Title + category */
+      .tc-info {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      .tc-title {
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--clr-txt-sidebar);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .tc-cat {
+        font-size: 10px;
+        color: var(--clr-txt-muted);
+        font-weight: 400;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      /* Actions: run btn + info icon — always pinned to the right */
+      .tc-actions {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex-shrink: 0;
+        margin-left: 12px;
+      }
+
+      /* Info icon */
+      .tc-info-icon {
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 20px;
+        height: 20px;
+        border-radius: 50%;
+        border: 1.5px solid var(--clr-accent);
+        color: var(--clr-accent);
+        font-size: 11px;
+        font-weight: 700;
+        font-style: italic;
+        cursor: default;
+        flex-shrink: 0;
         opacity: 1;
+        transition: background 0.15s, color 0.15s;
+        user-select: none;
+      }
+      .tc-info-icon:hover {
+        background: var(--clr-accent);
+        color: #fff;
+      }
+      /* Tooltip via pseudo-element */
+      .tc-info-icon::before {
+        content: attr(data-tooltip);
+        position: absolute;
+        right: -4px;
+        bottom: calc(100% + 8px);
+        background: #1a1b2e;
+        color: #e2e3f0;
+        padding: 9px 12px;
+        border-radius: 7px;
+        font-size: 11px;
+        font-weight: 400;
+        font-style: normal;
+        line-height: 1.6;
+        white-space: normal;
+        width: 220px;
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 0.15s;
+        z-index: 500;
+        border: 1px solid rgba(124,106,247,0.35);
+        box-shadow: 0 6px 18px rgba(0,0,0,0.35);
+      }
+      .tc-info-icon:hover::before,
+      .tc-info-icon:focus::before { opacity: 1; }
+
+      /* Journey flow banner */
+      .condition-flow-banner {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 4px 8px 4px 8px;
+        padding: 6px 10px;
+        background: rgba(124,106,247,0.10);
+        border: 1px solid rgba(124,106,247,0.25);
+        border-radius: var(--radius-sm);
+      }
+      .flow-banner-icon { font-size: 13px; flex-shrink: 0; }
+      .flow-banner-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+      .flow-banner-label {
+        font-size: 9px; font-weight: 700; text-transform: uppercase;
+        letter-spacing: 0.06em; color: var(--clr-accent);
+      }
+      .flow-banner-steps {
+        font-size: 11px; font-weight: 600; color: var(--clr-txt-sidebar); white-space: nowrap;
       }
 
       /* Empty state */
@@ -1365,6 +1527,9 @@
         </div>
       </nav>
 
+      <!-- Sidebar resize handle -->
+      <div id="sidebar-resizer"></div>
+
       <!-- Main panel -->
       <main id="main">
         <!-- Browser chrome + viewport -->
@@ -1717,6 +1882,41 @@
       let running = false;
       let filterText = "";
 
+      // ── Sidebar resize ─────────────────────────────────────────────────────────
+      (function () {
+        const sidebar  = document.getElementById("sidebar");
+        const resizer  = document.getElementById("sidebar-resizer");
+        const MIN_W = 180, MAX_W = 520;
+        const STORAGE_KEY = "sidebar-width";
+
+        const saved = parseInt(localStorage.getItem(STORAGE_KEY), 10);
+        if (saved && saved >= MIN_W && saved <= MAX_W) sidebar.style.width = saved + "px";
+
+        let startX, startW;
+        resizer.addEventListener("mousedown", (e) => {
+          startX = e.clientX;
+          startW = sidebar.getBoundingClientRect().width;
+          resizer.classList.add("dragging");
+          document.body.style.cursor = "col-resize";
+          document.body.style.userSelect = "none";
+
+          const onMove = (e) => {
+            const w = Math.min(MAX_W, Math.max(MIN_W, startW + (e.clientX - startX)));
+            sidebar.style.width = w + "px";
+          };
+          const onUp = () => {
+            resizer.classList.remove("dragging");
+            document.body.style.cursor = "";
+            document.body.style.userSelect = "";
+            localStorage.setItem(STORAGE_KEY, parseInt(sidebar.style.width, 10));
+            document.removeEventListener("mousemove", onMove);
+            document.removeEventListener("mouseup", onUp);
+          };
+          document.addEventListener("mousemove", onMove);
+          document.addEventListener("mouseup", onUp);
+        });
+      })();
+
       // ── DOM refs ───────────────────────────────────────────────────────────────
       const pharmacyDropdown = document.getElementById("pharmacy-dropdown");
       const pharmacyTrigger  = document.getElementById("pharmacy-trigger");
@@ -2045,18 +2245,35 @@
           childrenDiv.className = "tree-children open";
 
           for (const [suite, sTests] of Object.entries(suites)) {
+            // Only render condition tests (TC-### cards); skip plain spec tests
+            const conditionTests = sTests.filter((t) => !!t._slug);
             if (suite === "__direct__") {
-              sTests.forEach((t) =>
-                childrenDiv.appendChild(makeTestNode(t, "suite-direct")),
+              conditionTests.forEach((t, idx) =>
+                childrenDiv.appendChild(makeTestNode(t, "suite-direct", idx + 1)),
               );
             } else {
+              if (conditionTests.length === 0) continue;
+
               const suiteHdr = document.createElement("div");
               suiteHdr.className = "tree-suite-hdr open";
               suiteHdr.innerHTML = `<span class="chevron">▶</span><span>${suite}</span>`;
 
               const suiteChildren = document.createElement("div");
               suiteChildren.className = "tree-children open";
-              sTests.forEach((t) => suiteChildren.appendChild(makeTestNode(t)));
+
+              // Journey flow banner at top of conditions group
+              const flowBanner = document.createElement("div");
+              flowBanner.className = "condition-flow-banner";
+              flowBanner.innerHTML = `
+                <span class="flow-banner-icon">📋</span>
+                <div class="flow-banner-text">
+                  <span class="flow-banner-label">Journey Flow</span>
+                  <span class="flow-banner-steps">Booking → Signup → Confirm</span>
+                </div>
+              `;
+              suiteChildren.appendChild(flowBanner);
+
+              conditionTests.forEach((t, idx) => suiteChildren.appendChild(makeTestNode(t, null, idx + 1)));
 
               suiteHdr.addEventListener("click", () => {
                 suiteHdr.classList.toggle("open");
@@ -2074,33 +2291,40 @@
         }
       }
 
-      function makeTestNode(t, extraClass) {
+      function makeTestNode(t, extraClass, tcIndex) {
+        const tcId = tcIndex != null ? `TC-${String(tcIndex).padStart(3, "0")}` : "TC-???";
+        const tooltip = `Slug: ${t._slug} — Steps: Navigate to conditions page → Select condition → Book appointment → Sign up or log in → Verify confirmation`;
+
         const div = document.createElement("div");
-        div.className = "tree-test" + (extraClass ? " " + extraClass : "");
+        div.className = ["tree-test", extraClass].filter(Boolean).join(" ");
         div.dataset.fullTitle = t.fullTitle || t.title;
+
         div.innerHTML = `
-        <span class="test-dot" data-title="${t.fullTitle || t.title}"></span>
-        <span class="test-name" title="${t.fullTitle || t.title}">${t._testName || t.title}</span>
-        <button class="run-test-btn" title="Run this test">▶</button>
-      `;
+          <div class="tc-main-row">
+            <div class="tc-id">${tcId}</div>
+            <div class="tc-info">
+              <div class="tc-title" title="${t._testName || t.title}">${t._testName || t.title}</div>
+              <div class="tc-cat">Conditions Flow</div>
+            </div>
+            <div class="tc-actions">
+              <button class="run-test-btn" title="Run this test case">▶</button>
+              <span class="tc-info-icon" tabindex="0" role="img" aria-label="Test case description" data-tooltip="${tooltip}">i</span>
+            </div>
+          </div>
+        `;
+
         div.querySelector(".run-test-btn").addEventListener("click", (e) => {
           e.stopPropagation();
-          startRun({
-            file: t.file,
-            line: t.line,
-            grep: t.fullTitle,
-            label: t._testName || t.title,
-            slug: t._slug,
-          });
+          startRun({ file: t.file, line: t.line, grep: t.fullTitle, label: t._testName || t.title, slug: t._slug });
         });
+
         div.addEventListener("click", (e) => {
-          if (e.target.classList.contains("run-test-btn")) return;
-          // just select without running
-          document
-            .querySelectorAll(".tree-test")
-            .forEach((n) => n.classList.remove("active"));
+          if (e.target.classList.contains("run-test-btn") || e.target.classList.contains("tc-info-icon")) return;
+          document.querySelectorAll(".tree-test").forEach((n) => n.classList.remove("active"));
           div.classList.add("active");
+          startRun({ file: t.file, line: t.line, grep: t.fullTitle, label: t._testName || t.title, slug: t._slug });
         });
+
         return div;
       }
 

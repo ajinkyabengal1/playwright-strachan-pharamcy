@@ -468,7 +468,7 @@ test.describe("Conditions flow", () => {
     let journeyStatus: "incomplete" | "completed" = "incomplete";
 
     await test.step("Complete dynamic journey (questionnaire / signup / booking)", async () => {
-      const MAX_ITERATIONS = 30;
+      const MAX_ITERATIONS = 7;
       const stepVisits: Record<string, number> = {};
       const MAX_STEP_VISITS = 6;
       let flowCompleted = false;
