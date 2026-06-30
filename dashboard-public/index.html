@@ -157,20 +157,78 @@
         color: var(--clr-txt-header);
         flex-shrink: 0;
       }
-      #pharmacy-select {
+      /* ── Custom pharmacy dropdown (always opens downward) ───────────────── */
+      #pharmacy-dropdown {
+        position: relative;
         flex: 0 0 220px;
+      }
+      #pharmacy-trigger {
+        width: 100%;
         height: 28px;
-        padding: 0 8px;
+        padding: 0 26px 0 8px;
         border-radius: var(--radius-sm);
         border: 1px solid var(--clr-border-drk);
         background: var(--clr-surface);
         color: var(--clr-txt-header);
         font-size: 13px;
         cursor: pointer;
-        outline: none;
+        display: flex;
+        align-items: center;
+        user-select: none;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        box-sizing: border-box;
+        position: relative;
       }
-      #pharmacy-select:focus {
+      #pharmacy-trigger::after {
+        content: "▾";
+        position: absolute;
+        right: 8px;
+        font-size: 11px;
+        color: var(--clr-txt-muted);
+        pointer-events: none;
+      }
+      #pharmacy-trigger:hover,
+      #pharmacy-dropdown.open #pharmacy-trigger {
         border-color: var(--clr-accent);
+      }
+      #pharmacy-options {
+        display: none;
+        position: absolute;
+        top: calc(100% + 4px);
+        left: 0;
+        min-width: 100%;
+        background: var(--clr-surface, #2e3047);
+        border: 1px solid var(--clr-border-drk);
+        border-radius: var(--radius-sm);
+        box-shadow: 0 6px 20px rgba(0,0,0,0.35);
+        z-index: 9999;
+        max-height: 320px;
+        overflow-y: auto;
+      }
+      #pharmacy-dropdown.open #pharmacy-options {
+        display: block;
+      }
+      .pharm-opt {
+        padding: 7px 12px;
+        font-size: 13px;
+        color: var(--clr-txt-header);
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .pharm-opt:hover {
+        background: var(--clr-accent);
+        color: #fff;
+      }
+      .pharm-opt.selected {
+        background: rgba(124,106,247,0.18);
+      }
+      .pharm-opt-placeholder {
+        padding: 7px 12px;
+        font-size: 13px;
+        color: var(--clr-txt-muted);
+        cursor: default;
       }
       #header .spacer {
         flex: 1;
@@ -1229,9 +1287,10 @@
     <header id="header">
       <div class="logo">🎭</div>
       <div class="title">Playwright</div>
-      <select id="pharmacy-select" title="Select pharmacy">
-        <option value="">Loading pharmacies…</option>
-      </select>
+      <div id="pharmacy-dropdown" title="Select pharmacy">
+        <div id="pharmacy-trigger">Loading pharmacies…</div>
+        <div id="pharmacy-options"></div>
+      </div>
       <div class="spacer"></div>
       <button id="theme-toggle" title="Toggle theme">🌓</button>
       <button
@@ -1659,7 +1718,14 @@
       let filterText = "";
 
       // ── DOM refs ───────────────────────────────────────────────────────────────
-      const pharmacySel = document.getElementById("pharmacy-select");
+      const pharmacyDropdown = document.getElementById("pharmacy-dropdown");
+      const pharmacyTrigger  = document.getElementById("pharmacy-trigger");
+      const pharmacyOptions  = document.getElementById("pharmacy-options");
+      // Shim so existing code that reads pharmacySel.value still works
+      const pharmacySel = {
+        get value() { return pharmacyDropdown.dataset.value || ""; },
+        set value(v) { pharmacyDropdown.dataset.value = v; }
+      };
       const btnRunAll = document.getElementById("btn-run-all");
       const btnStop = document.getElementById("btn-stop");
       const statusDot = document.getElementById("status-dot");
@@ -1777,22 +1843,56 @@
 
       // ── Pharmacy load ──────────────────────────────────────────────────────────
       let allPharmacies = [];
+
+      function setSelectedPharmacy(name) {
+        pharmacyDropdown.dataset.value = name || "";
+        pharmacyTrigger.textContent = name || "Select pharmacy…";
+        pharmacyOptions.querySelectorAll(".pharm-opt").forEach((el) => {
+          el.classList.toggle("selected", el.dataset.value === name);
+        });
+        pharmacyDropdown.classList.remove("open");
+      }
+
+      function openPharmacyDropdown() {
+        pharmacyDropdown.classList.toggle("open");
+      }
+
+      pharmacyTrigger.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openPharmacyDropdown();
+      });
+
+      document.addEventListener("click", () => {
+        pharmacyDropdown.classList.remove("open");
+      });
+
+      pharmacyOptions.addEventListener("click", (e) => {
+        const opt = e.target.closest(".pharm-opt");
+        if (!opt) return;
+        const name = opt.dataset.value;
+        setSelectedPharmacy(name);
+        // Fire the same logic as the old "change" handler
+        onPharmacyChange(name);
+      });
+
       async function loadPharmacies() {
         try {
           const res = await fetch("/api/pharmacies");
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           allPharmacies = await res.json();
-          pharmacySel.innerHTML = '<option value="">Select pharmacy…</option>';
+          pharmacyOptions.innerHTML =
+            '<div class="pharm-opt-placeholder">Select pharmacy…</div>';
           allPharmacies.forEach((p) => {
-            const opt = document.createElement("option");
-            opt.value = p.name;
-            opt.textContent = p.name;
-            pharmacySel.appendChild(opt);
+            const el = document.createElement("div");
+            el.className = "pharm-opt";
+            el.dataset.value = p.name;
+            el.textContent = p.name;
+            pharmacyOptions.appendChild(el);
           });
+          pharmacyTrigger.textContent = "Select pharmacy…";
           setStatus("idle", "Select a pharmacy to load tests");
         } catch (e) {
-          pharmacySel.innerHTML =
-            '<option value="">Error loading pharmacies</option>';
+          pharmacyTrigger.textContent = "Error loading pharmacies";
           setStatus("idle", "Failed to load pharmacies: " + e.message);
         }
       }
@@ -1816,8 +1916,7 @@
         }
       }
 
-      pharmacySel.addEventListener("change", () => {
-        const name = pharmacySel.value;
+      function onPharmacyChange(name) {
         if (!name) {
           treeEl.innerHTML =
             '<div class="empty-state">Select a pharmacy to load tests</div>';
@@ -1829,7 +1928,7 @@
         const savedBranch = currentTestData?.pharmacy?.preferredBranch || "";
         loadBranches(pharmacyData?.baseURL, savedBranch);
         loadTests(name, pharmacyData?.baseURL);
-      });
+      }
 
       // ── Test list load ─────────────────────────────────────────────────────────
       async function loadTests(pharmacyName, baseURL) {

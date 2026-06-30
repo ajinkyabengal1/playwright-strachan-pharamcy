@@ -100,20 +100,37 @@ function listTests() {
 }
 
 // ── Per-pharmacy Sanity configuration ─────────────────────────────────────────
-// Add an entry here for each pharmacy website. The key is the hostname.
-// For `usePharmacyNameFilter: true`, conditions are filtered by matching
-// pharmacy branch names in Sanity (using the `corporateId` field).
-// Otherwise, `query` is executed directly against that pharmacy's Sanity project.
+// Three config shapes:
+//   usePharmacyNameFilter: true  — resolve corporateIds via a name keyword lookup (Strachans)
+//   query: "..."                 — run a raw GROQ query (Health Check)
+//   corporateId: <number>        — filter by a known corporateId in the shared healthya project
+const HEALTHYA_SANITY_BASE = "https://avnvku5j.api.sanity.io/v2023-01-01/data/query/production";
+
 const PHARMACY_SANITY_CONFIGS = {
+  // ── Strachans (own Sanity project, corporateId resolved by name) ───────────
   "strachans-pharamcy.healthya.co.uk": {
     sanityBase: "https://gnx5auvv.api.sanity.io/v2026-06-15/data/query/dev",
     usePharmacyNameFilter: true,
     keyword: "strachans",
   },
+
+  // ── Health Check (own Sanity project, raw query) ───────────────────────────
   "health-check-pharmacy.vercel.app": {
     sanityBase: "https://fsri74r8.api.sanity.io/v2026-06-29/data/query/dev",
     query: `*[_type == "singleCondition" && conditionLogStatus == "active" && !(_id in path("drafts.**"))]{title, "conditionSlug": conditionSlug.current}`,
   },
+
+  // ── Shared healthya.co.uk pharmacies (project avnvku5j, filtered by corporateId) ──
+  "werneth.healthya.co.uk":       { sanityBase: HEALTHYA_SANITY_BASE, corporateId: 1102 },
+  "hunts-cross.healthya.co.uk":   { sanityBase: HEALTHYA_SANITY_BASE, corporateId: 1098 },
+  "edgeley.healthya.co.uk":       { sanityBase: HEALTHYA_SANITY_BASE, corporateId: 1090 },
+  "liverpool-road.healthya.co.uk":{ sanityBase: HEALTHYA_SANITY_BASE, corporateId: 1105 },
+  "tupton.healthya.co.uk":        { sanityBase: HEALTHYA_SANITY_BASE, corporateId: 1073 },
+  "allestree.healthya.co.uk":     { sanityBase: HEALTHYA_SANITY_BASE, corporateId: 1076 },
+  "holmewood.healthya.co.uk":     { sanityBase: HEALTHYA_SANITY_BASE, corporateId: 1096 },
+  "harehills.healthya.co.uk":     { sanityBase: HEALTHYA_SANITY_BASE, corporateId: 1099 },
+  "talbot-road.healthya.co.uk":   { sanityBase: HEALTHYA_SANITY_BASE, corporateId: 1072 },
+  "brunshaw.healthya.co.uk":      { sanityBase: HEALTHYA_SANITY_BASE, corporateId: 1083 },
 };
 
 // ── Flow configs (mirrors flow-configs.ts — JS copy for dashboard) ────────────
@@ -352,8 +369,13 @@ app.get("/api/sanity-conditions", async (req, res) => {
       const config = hostname && PHARMACY_SANITY_CONFIGS[hostname];
       if (!config) return res.json({ result: [] });
 
-      if (config.usePharmacyNameFilter) {
-        // Two-step: resolve corporateIds from Sanity pharmacy docs, then filter conditions
+      if (config.corporateId != null) {
+        // Direct corporateId filter — shared healthya project
+        const q = `*[_type == "singleCondition" && corporateId == ${config.corporateId} && conditionLogStatus == "active"]{title, "conditionSlug": conditionSlug.current}`;
+        const condData = await httpGetJson(`${config.sanityBase}?query=${encodeURIComponent(q)}`);
+        sanityConditions = condData.result || [];
+      } else if (config.usePharmacyNameFilter) {
+        // Two-step: resolve corporateIds from Sanity pharmacy docs by name, then filter conditions
         const pharmData = await httpGetJson(
           `${config.sanityBase}?query=${encodeURIComponent('*[_type == "pharmacies"]{name, corporateId}')}&perspective=drafts`
         );
@@ -367,7 +389,7 @@ app.get("/api/sanity-conditions", async (req, res) => {
         const condData = await httpGetJson(`${config.sanityBase}?query=${encodeURIComponent(condQuery)}&perspective=drafts`);
         sanityConditions = condData.result || [];
       } else {
-        // Direct query against this pharmacy's own Sanity project
+        // Direct raw GROQ query (Health Check and similar)
         const condData = await httpGetJson(
           `${config.sanityBase}?query=${encodeURIComponent(config.query)}&perspective=drafts`
         );
