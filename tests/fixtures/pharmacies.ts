@@ -13,7 +13,7 @@ export interface PharmacySite {
 export const PHARMACY_SITES: PharmacySite[] = [
   {
     name: "Strachans Pharmacy",
-    baseURL: "https://strachans-pharamcy.healthya.co.uk/",
+    baseURL: "https://strachan-pharmacy.vercel.app/",
     ciSkip: true,
   },
   {
@@ -22,53 +22,13 @@ export const PHARMACY_SITES: PharmacySite[] = [
     ciSkip: true,
   },
   {
-    name: "Imaan Pharmacy Werneth",
-    baseURL: "https://werneth.healthya.co.uk/",
+    name: "Kepple Lane Pharmacy",
+    baseURL: "https://kepple-lane-pharmacy.vercel.app/",
     ciSkip: true,
   },
   {
-    name: "Hunts Cross Pharmacy",
-    baseURL: "https://hunts-cross.healthya.co.uk/",
-    ciSkip: true,
-  },
-  {
-    name: "Edgeley Pharmacy",
-    baseURL: "https://edgeley.healthya.co.uk/",
-    ciSkip: true,
-  },
-  {
-    name: "Liverpool Road Pharmacy",
-    baseURL: "https://liverpool-road.healthya.co.uk/",
-    ciSkip: true,
-  },
-  {
-    name: "Tupton Pharmacy",
-    baseURL: "https://tupton.healthya.co.uk/",
-    ciSkip: true,
-  },
-  {
-    name: "Allestree Pharmacy",
-    baseURL: "https://allestree.healthya.co.uk/",
-    ciSkip: true,
-  },
-  {
-    name: "Holmewood Pharmacy",
-    baseURL: "https://holmewood.healthya.co.uk/",
-    ciSkip: true,
-  },
-  {
-    name: "Imaan Pharmacy Leeds",
-    baseURL: "https://harehills.healthya.co.uk/",
-    ciSkip: true,
-  },
-  {
-    name: "Talbot Road Pharmacy",
-    baseURL: "https://talbot-road.healthya.co.uk/",
-    ciSkip: true,
-  },
-  {
-    name: "Brunshaw Pharmacy",
-    baseURL: "https://brunshaw.healthya.co.uk/",
+    name: "Central Pharmacy",
+    baseURL: "https://central-pharmacy.vercel.app/",
     ciSkip: true,
   },
 ];

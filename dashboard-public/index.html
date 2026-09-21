@@ -2104,11 +2104,11 @@
         try {
           const res = await fetch(`/api/branches?baseURL=${encodeURIComponent(baseURL)}`);
           const data = await res.json();
-          (data.branches || []).forEach(({ slug, name }) => {
+          (data.branches || []).forEach(({ name }) => {
             const opt = document.createElement("option");
-            opt.value = slug;
+            opt.value = name;
             opt.textContent = name;
-            if (slug === preselect) opt.selected = true;
+            if (name === preselect) opt.selected = true;
             sel.appendChild(opt);
           });
         } catch (e) {

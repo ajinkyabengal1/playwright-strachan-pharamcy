@@ -106,9 +106,11 @@ function listTests() {
 //   corporateId: <number>        — filter by a known corporateId in the shared healthya project
 const HEALTHYA_SANITY_BASE = "https://avnvku5j.api.sanity.io/v2023-01-01/data/query/production";
 
+const SINGLE_CONDITION_QUERY = `*[_type == "singleCondition" && conditionLogStatus == "active" && !(_id in path("drafts.**"))]{title, "conditionSlug": conditionSlug.current}`;
+
 const PHARMACY_SANITY_CONFIGS = {
   // ── Strachans (own Sanity project, corporateId resolved by name) ───────────
-  "strachans-pharamcy.healthya.co.uk": {
+  "strachan-pharmacy.vercel.app": {
     sanityBase: "https://gnx5auvv.api.sanity.io/v2026-06-15/data/query/dev",
     usePharmacyNameFilter: true,
     keyword: "strachans",
@@ -117,7 +119,19 @@ const PHARMACY_SANITY_CONFIGS = {
   // ── Health Check (own Sanity project, raw query) ───────────────────────────
   "health-check-pharmacy.vercel.app": {
     sanityBase: "https://fsri74r8.api.sanity.io/v2026-06-29/data/query/dev",
-    query: `*[_type == "singleCondition" && conditionLogStatus == "active" && !(_id in path("drafts.**"))]{title, "conditionSlug": conditionSlug.current}`,
+    query: SINGLE_CONDITION_QUERY,
+  },
+
+  // ── Kepple Lane (own Sanity project, raw query) ─────────────────────────────
+  "kepple-lane-pharmacy.vercel.app": {
+    sanityBase: "https://ascai7ju.api.sanity.io/v2026-06-29/data/query/dev",
+    query: SINGLE_CONDITION_QUERY,
+  },
+
+  // ── Central Pharmacy (own Sanity project, raw query) ────────────────────────
+  "central-pharmacy.vercel.app": {
+    sanityBase: "https://n7mvx092.api.sanity.io/v2026-06-29/data/query/dev",
+    query: SINGLE_CONDITION_QUERY,
   },
 
   // ── Shared healthya.co.uk pharmacies (project avnvku5j, filtered by corporateId) ──
@@ -425,30 +439,31 @@ app.get("/api/branches", async (req, res) => {
     const baseURL = req.query.baseURL;
     if (!baseURL) return res.json({ branches: [] });
 
-    const html = await new Promise((resolve, reject) => {
-      https.get(baseURL, (r) => {
-        let raw = "";
-        r.on("data", (c) => (raw += c));
-        r.on("end", () => resolve(raw));
-      }).on("error", reject);
-    });
+    let hostname;
+    try { hostname = new URL(baseURL).hostname; } catch (_) {}
+    const config = hostname && PHARMACY_SANITY_CONFIGS[hostname];
+    if (!config) return res.json({ branches: [] });
 
-    const seen = new Set();
-    const branches = [];
-    const re = /href="\/([^/"]+)\/conditions\/[^"]+"/g;
-    let m;
-    while ((m = re.exec(html)) !== null) {
-      const slug = m[1];
-      if (!seen.has(slug)) {
-        seen.add(slug);
-        const name = slug
-          .split("-")
-          .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-          .join(" ")
-          .replace(/\bChemist\b/, "Chemist -");
-        branches.push({ slug, name });
-      }
+    // Branches are Sanity "pharmacies" docs — auto-detected per pharmacy project
+    // instead of scraped from the live site's HTML.
+    const pharmData = await httpGetJson(
+      `${config.sanityBase}?query=${encodeURIComponent('*[_type == "pharmacies" && status == "active"]{name, "slug": slug.current, corporateId}')}&perspective=drafts`
+    );
+    let docs = pharmData.result || [];
+    if (config.usePharmacyNameFilter) {
+      docs = docs.filter((p) => p.name && p.name.toLowerCase().includes(config.keyword || ""));
     }
+
+    // "name" is the branch's real, on-site display name (e.g. "strachans-one") —
+    // it's what BookingPage.selectBranch clicks by visible text, so it must match
+    // the live site's own "Our branches" labels, not the URL slug.
+    const branches = docs
+      .filter((p) => p.name)
+      .map((p) => ({
+        slug: p.slug,
+        name: p.name,
+        corporateId: p.corporateId,
+      }));
 
     res.json({ branches });
   } catch (e) {
