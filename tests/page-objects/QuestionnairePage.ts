@@ -1,10 +1,21 @@
 import { Page } from "@playwright/test";
-import { getActiveConditionName } from "../fixtures/test-data";
+import { getActiveConditionName, TEST_USER } from "../fixtures/test-data";
 import {
   ERECTILE_DYSFUNCTION_RULES,
   SHINGLES_RULES,
   WEIGHT_MANAGEMENT_RULES,
 } from "./ConditionQuestionnaireRules";
+
+// Fallback answers for generic questionnaire fields that don't map to a
+// specific rule (free-text boxes, occupation, etc.) or to real patient data
+// (name/DOB/postcode — those use TEST_USER instead, see fillPatientInfoField
+// below). Kept local rather than in test-data.ts, which real patient-info
+// fields also read from.
+const QUESTIONNAIRE_DEFAULTS = {
+  freeTextAnswer:
+    "No significant medical history or concerns to report at this time.",
+  occupation: "Office worker",
+};
 
 /**
  * Handles the dynamic questionnaire wizard.
@@ -14,6 +25,17 @@ export class QuestionnairePage {
   readonly page: Page;
   private readonly MAX_QUESTIONS = 50;
   private readonly answeredRuleKeys = new Set<string>();
+  private readonly stuckSelectAttempts = new Map<string, number>();
+
+  /**
+   * True once a terminal Result screen with no booking option (e.g.
+   * "Self care", "Assessment complete") has been ended via its
+   * "End assessment" button. That is a valid, successful end to the
+   * journey — a pharmacist reviews the answers instead of a booking being
+   * made — so the spec should count it as completed rather than failing
+   * the run for never reaching a booking confirmation.
+   */
+  endedWithoutBooking = false;
 
   constructor(page: Page) {
     this.page = page;
@@ -28,11 +50,23 @@ export class QuestionnairePage {
     await this.page
       .locator(
         [
+          // Next.js dev-mode ships a permanently-mounted (but hidden)
+          // error-overlay dialog on every page; its stack trace/message can
+          // coincidentally contain the word "Questionnaire" and falsely
+          // satisfy the dialog selectors below, so exclude it explicitly.
+          '[role="dialog"][aria-label*="questionnaire" i]:not([data-nextjs-dialog])',
+          '[role="dialog"]:has-text("Questionnaire"):not([data-nextjs-dialog])',
           ':text("Questionnaires")',
           ':text("Do you have these symptoms?")',
           ':text("I do not have these symptoms")',
           ".question-container",
-          '[class*="question"]',
+          // Legacy "hq-kit" questionnaire template (e.g. Kepple Lane's
+          // "personal-information-gathering" condition): a single-page form
+          // rendered inline, not a modal.
+          ".questionnaire-answer-box--kit",
+          ".hq-root",
+          ".hq-question",
+          '[class*="question"]:not([data-nextjs-dialog])',
           'button:has-text("Save")',
           'button:has-text("Next")',
           'button:has-text("Continue")',
@@ -59,6 +93,17 @@ export class QuestionnairePage {
     for (let step = 0; step < this.MAX_QUESTIONS; step++) {
       await this.page.waitForTimeout(200); // brief pause for animations
 
+      // "Age should be between X and Y" validation error also renders a
+      // "Back to Home" button, which isOnThankYouPage() below treats as a
+      // generic success indicator — without this check first, that guard
+      // would silently return here without ever clicking anything.
+      if (await this.handleAgeValidationError()) {
+        console.log(
+          "[QuestionnairePage] Age validation error detected — clicked Back to Home",
+        );
+        return;
+      }
+
       // Guard: once thank-you page is visible, stop questionnaire handling immediately.
       if (await this.isOnThankYouPage()) {
         console.log(
@@ -67,25 +112,36 @@ export class QuestionnairePage {
         return;
       }
 
-      // Guard: once drug selection is visible, stop questionnaire handling.
-      if (await this.isOnDrugSelectionPage()) {
-        console.log(
-          "[QuestionnairePage] Drug selection UI detected — exiting questionnaire handler",
-        );
-        return;
-      }
+      // A questionnaire modal dialog (e.g. Kepple Lane) sits on top of the
+      // booking page, whose own background markup (heading "Book: ...",
+      // `[class*="booking"]` wrappers) can false-positive the drug-selection/
+      // payment/signup-or-booking checks below. While the dialog is open,
+      // skip those bail-out checks so this loop keeps answering its
+      // progressively-revealed questions instead of returning to the outer
+      // spec loop after every single question.
+      const dialogOpen = await this.isQuestionnaireDialogOpen();
 
-      // Guard: once payment is visible, stop questionnaire handling immediately.
-      if (await this.isOnPaymentPage()) {
-        console.log(
-          "[QuestionnairePage] Payment UI detected — exiting questionnaire handler",
-        );
-        return;
-      }
+      if (!dialogOpen) {
+        // Guard: once drug selection is visible, stop questionnaire handling.
+        if (await this.isOnDrugSelectionPage()) {
+          console.log(
+            "[QuestionnairePage] Drug selection UI detected — exiting questionnaire handler",
+          );
+          return;
+        }
 
-      // If we've reached the signup form, stop
-      if (await this.isOnSignupOrBookingPage()) {
-        return;
+        // Guard: once payment is visible, stop questionnaire handling immediately.
+        if (await this.isOnPaymentPage()) {
+          console.log(
+            "[QuestionnairePage] Payment UI detected — exiting questionnaire handler",
+          );
+          return;
+        }
+
+        // If we've reached the signup form, stop
+        if (await this.isOnSignupOrBookingPage()) {
+          return;
+        }
       }
 
       // If we are no longer on a questionnaire page and no question is visible, we are done
@@ -103,8 +159,10 @@ export class QuestionnairePage {
         // No question found and no button — might be loading or done
         await this.page.waitForTimeout(1000);
         if (await this.isOnThankYouPage()) return;
-        if (await this.isOnDrugSelectionPage()) return;
-        if (await this.isOnSignupOrBookingPage()) return;
+        if (!(await this.isQuestionnaireDialogOpen())) {
+          if (await this.isOnDrugSelectionPage()) return;
+          if (await this.isOnSignupOrBookingPage()) return;
+        }
         if (!(await this.isOnQuestionnairePage())) return;
       }
     }
@@ -1102,43 +1160,72 @@ export class QuestionnairePage {
     }
 
     // Numerical input
-    const numberInput = this.page.locator(
+    // Filter to inputs that are actually usable — a matched field can be
+    // disabled (e.g. a blood-pressure field this same handler already
+    // filled correctly, then the site locks it read-only) or already
+    // filled, and blindly `.fill()`-ing a disabled field hangs for the
+    // full 15s action timeout instead of failing fast.
+    const numberInputAll = this.page.locator(
       'input[type="number"], input[inputmode="numeric"]',
     );
-    if (await numberInput.isVisible().catch(() => false)) {
-      const count = await numberInput.count();
-      if (count >= 2) {
-        await numberInput.nth(0).click();
-        await numberInput.nth(0).fill("170");
-        await numberInput.nth(1).click();
-        await numberInput.nth(1).fill("70");
+    const numberInputCount = await numberInputAll.count().catch(() => 0);
+    const usableNumberInputs: ReturnType<Page["locator"]>[] = [];
+    for (let i = 0; i < numberInputCount; i++) {
+      const candidate = numberInputAll.nth(i);
+      const usable =
+        (await candidate.isVisible().catch(() => false)) &&
+        (await candidate.isEnabled().catch(() => false)) &&
+        (await candidate.evaluate((el: HTMLInputElement) => !el.value).catch(() => true));
+      if (usable) usableNumberInputs.push(candidate);
+    }
+    if (usableNumberInputs.length > 0) {
+      if (usableNumberInputs.length >= 2) {
+        await usableNumberInputs[0].click();
+        await usableNumberInputs[0].fill("170");
+        await usableNumberInputs[1].click();
+        await usableNumberInputs[1].fill("70");
       } else {
         const pageText = await this.page.textContent("body").catch(() => "");
         if (/height|cm/i.test(pageText ?? "")) {
-          await numberInput.first().fill("170");
+          await usableNumberInputs[0].fill("170");
         } else if (/weight|kg/i.test(pageText ?? "")) {
-          await numberInput.first().fill("70");
+          await usableNumberInputs[0].fill("70");
         } else {
-          await numberInput.first().fill("70");
+          await usableNumberInputs[0].fill("70");
         }
       }
       return true;
     }
 
     // Text / textarea
-    const textInput = this.page.locator(
+    const textInputAll = this.page.locator(
       'input[type="text"]:not([name="first_name"]):not([name="last_name"]):not([name="postcode"]), textarea',
     );
-    if (await textInput.isVisible().catch(() => false)) {
-      await textInput.first().click();
-      await textInput.first().clear();
-      await textInput.first().fill("None");
+    const textInputCount = await textInputAll.count().catch(() => 0);
+    for (let i = 0; i < textInputCount; i++) {
+      const candidate = textInputAll.nth(i);
+      const usable =
+        (await candidate.isVisible().catch(() => false)) &&
+        (await candidate.isEnabled().catch(() => false)) &&
+        (await candidate.evaluate((el: HTMLInputElement | HTMLTextAreaElement) => !el.value).catch(() => true));
+      if (!usable) continue;
+      await candidate.click();
+      await candidate.clear();
+      await candidate.fill(QUESTIONNAIRE_DEFAULTS.freeTextAnswer);
       return true;
     }
 
     // Date picker
-    const datePicker = this.page.locator(".ant-picker input").first();
-    if (await datePicker.isVisible().catch(() => false)) {
+    const datePickerAll = this.page.locator(".ant-picker input");
+    const datePickerCount = await datePickerAll.count().catch(() => 0);
+    for (let i = 0; i < datePickerCount; i++) {
+      const candidate = datePickerAll.nth(i);
+      const usable =
+        (await candidate.isVisible().catch(() => false)) &&
+        (await candidate.isEnabled().catch(() => false)) &&
+        (await candidate.evaluate((el: HTMLInputElement) => !el.value).catch(() => true));
+      if (!usable) continue;
+      const datePicker = candidate;
       await datePicker.click();
       await datePicker.fill("1990-01-01");
       await this.page.keyboard.press("Enter");
@@ -1148,7 +1235,166 @@ export class QuestionnairePage {
     return false;
   }
 
+  /**
+   * Repeatedly re-scans the page within a single call. Checking a checkbox
+   * or radio can reveal brand-new nested required fields (e.g. selecting a
+   * "Sport" hobby reveals "Which game do you like?" and a date range) whose
+   * section (range pickers, numbers, etc.) already ran earlier in the same
+   * linear pass — without this outer loop, those newly-revealed fields
+   * never get filled until here catches them on a follow-up pass.
+   */
   private async fillAllVisibleQuestions(): Promise<boolean> {
+    let answeredOverall = false;
+    for (let pass = 0; pass < 4; pass++) {
+      const answeredThisPass = await this.fillVisibleQuestionsOnce();
+      if (!answeredThisPass) break;
+      answeredOverall = true;
+      await this.page.waitForTimeout(200); // let newly-revealed fields mount
+    }
+    return answeredOverall;
+  }
+
+  /**
+   * Finds the question text nearest to a field, trying this hq-kit
+   * template's own wrapper (`.hq-question` / `.hq-question__title`) as well
+   * as the older wrapper classes used by other tenants.
+   */
+  private async getNearbyQuestionText(
+    input: ReturnType<Page["locator"]>,
+  ): Promise<string> {
+    const hqTitle = input
+      .locator(
+        'xpath=ancestor::*[contains(@class,"hq-question")][1]//*[contains(@class,"hq-question__title")]',
+      )
+      .first();
+    if (await hqTitle.count().catch(() => 0)) {
+      const text = (await hqTitle.textContent().catch(() => "")) || "";
+      if (text.trim()) return text;
+    }
+
+    const legacyWrapper = this.page
+      .locator(
+        '.questionnaire-answer-wrapper, .numerical-question-wrapper, .text-box-question-wrapper, .textarea-question-wrapper, .health-data-question-wrapper',
+      )
+      .filter({ has: input })
+      .first();
+    if (await legacyWrapper.count().catch(() => 0)) {
+      const qLabel = legacyWrapper.locator(".questions");
+      if (await qLabel.count().catch(() => 0)) {
+        return (await qLabel.first().textContent().catch(() => "")) || "";
+      }
+    }
+
+    return "";
+  }
+
+  /**
+   * Picks a numeric value that actually satisfies a field's valid range,
+   * instead of a hardcoded guess. Reads the field's own `min`/`max`
+   * attributes first, then falls back to parsing "between X and/to Y"
+   * phrasing from its placeholder or question text (e.g. "Value should be
+   * between 100 and 250", "Enter Number between 12 to 20"). The fallback
+   * default is used only when no range is found, and is clamped to any
+   * range that is found.
+   */
+  private async resolveNumericValue(
+    input: ReturnType<Page["locator"]>,
+    questionText: string,
+    placeholder: string,
+    fallback: number,
+  ): Promise<string> {
+    const attrMin = await input.getAttribute("min").catch(() => null);
+    const attrMax = await input.getAttribute("max").catch(() => null);
+    let min = attrMin !== null && attrMin !== "" ? Number(attrMin) : undefined;
+    let max = attrMax !== null && attrMax !== "" ? Number(attrMax) : undefined;
+
+    if (min === undefined || max === undefined) {
+      const combined = `${questionText} ${placeholder}`;
+      const rangeMatch = combined.match(
+        /between\s+(\d+(?:\.\d+)?)\s*(?:and|to|-)\s*(\d+(?:\.\d+)?)/i,
+      );
+      if (rangeMatch) {
+        min = min ?? Number(rangeMatch[1]);
+        max = max ?? Number(rangeMatch[2]);
+      }
+    }
+
+    let value = fallback;
+    if (min !== undefined && !Number.isNaN(min) && value < min) {
+      value = max !== undefined && !Number.isNaN(max) ? Math.round((min + max) / 2) : min;
+    }
+    if (max !== undefined && !Number.isNaN(max) && value > max) {
+      value = min !== undefined && !Number.isNaN(min) ? Math.round((min + max) / 2) : max;
+    }
+    return String(value);
+  }
+
+  /**
+   * A field can already hold a value yet still be invalid (e.g. "11" in a
+   * min="100" max="250" height field) — that's not "empty" but must still
+   * be re-filled, or the site's own validation error blocks submission
+   * forever. Returns true when the field has no min/max bounds (nothing to
+   * violate) or its current value satisfies them.
+   */
+  private async isWithinDeclaredBounds(
+    input: ReturnType<Page["locator"]>,
+  ): Promise<boolean> {
+    return input
+      .evaluate((el: HTMLInputElement) => {
+        const raw = el.value;
+        if (!raw) return true; // emptiness is handled separately
+        const num = Number(raw);
+        if (Number.isNaN(num)) return true; // not a bounds violation we can judge
+        const min = el.getAttribute("min");
+        const max = el.getAttribute("max");
+        if (min !== null && min !== "" && num < Number(min)) return false;
+        if (max !== null && max !== "" && num > Number(max)) return false;
+        return true;
+      })
+      .catch(() => true);
+  }
+
+  /**
+   * Blood-pressure fields (`inputmode="numeric"`, placeholder "___/___")
+   * are masked inputs that auto-insert the "/" themselves as digits are
+   * typed — `.fill("120/80")` sets the raw value in one shot, bypassing
+   * that masking logic entirely, and the component's own onChange handler
+   * then rejects/reverts the unexpected literal "/" character, leaving the
+   * field empty. Type the digits only via real keystrokes instead, and let
+   * the mask insert the separator; fall back to a literal fill only if
+   * that doesn't stick.
+   */
+  private async fillBloodPressure(
+    input: ReturnType<Page["locator"]>,
+  ): Promise<void> {
+    // A complete result looks like "120/80" — a bare digit (e.g. a stray
+    // "170/" left by a half-applied mask) is NOT success and must keep
+    // retrying, unlike other fields where "contains a digit" is enough.
+    const isComplete = (v: string) => /^\d{2,3}\/\d{2,3}$/.test(v.trim());
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await input.click({ force: true }).catch(() => {});
+      // .fill("") alone can fail to clear a masked input; select-all +
+      // backspace via real keyboard input is more reliable here, same
+      // approach already used for the date pickers elsewhere in this file.
+      await this.page.keyboard.press("Meta+A").catch(() => {});
+      await this.page.keyboard.press("Control+A").catch(() => {});
+      await this.page.keyboard.press("Backspace").catch(() => {});
+      await input.fill("").catch(() => {});
+
+      await input.type("12080", { delay: 40 }).catch(() => {});
+      await this.page.waitForTimeout(250);
+      let value = (await input.inputValue().catch(() => "")) ?? "";
+      if (isComplete(value)) return;
+
+      // Mask didn't cooperate — try a literal fill with the separator.
+      await input.fill("120/80").catch(() => {});
+      value = (await input.inputValue().catch(() => "")) ?? "";
+      if (isComplete(value)) return;
+    }
+  }
+
+  private async fillVisibleQuestionsOnce(): Promise<boolean> {
     let answeredAny = false;
 
     // 1. Handle Date/Range Pickers
@@ -1302,7 +1548,10 @@ export class QuestionnairePage {
     // 2. Handle Text / Textarea fields
     const textInputs = this.page.locator(
       'input[type="text"]:not([name="first_name"]):not([name="last_name"]):not([name="postcode"]):not([name="email"]):not([name="phone"]), ' +
-      'input:not([type]):not([name="first_name"]):not([name="last_name"]):not([name="postcode"]):not([name="email"]):not([name="phone"]), ' +
+      // AntD's InputNumber inner input has no `type` attribute but is
+      // numeric-only — excluded here so section 3 below handles it instead;
+      // filling it with text here gets silently rejected/reverted forever.
+      'input:not([type]):not(.ant-input-number-input):not([name="first_name"]):not([name="last_name"]):not([name="postcode"]):not([name="email"]):not([name="phone"]), ' +
       'textarea'
     );
     const textCount = await textInputs.count().catch(() => 0);
@@ -1310,71 +1559,148 @@ export class QuestionnairePage {
       const input = textInputs.nth(i);
       const isVisible = await input.isVisible().catch(() => false);
       const isEmpty = await input.evaluate((el: HTMLInputElement | HTMLTextAreaElement) => !el.value).catch(() => true);
-      if (isVisible && isEmpty) {
-        // Find question text context
-        const parentWrapper = this.page.locator('.questionnaire-answer-wrapper, .text-box-question-wrapper, .textarea-question-wrapper, .health-data-question-wrapper').filter({ has: input }).first();
-        let questionText = "";
-        if (await parentWrapper.count() > 0) {
-          const qLabel = parentWrapper.locator('.questions');
-          if (await qLabel.count() > 0) {
-            questionText = (await qLabel.first().textContent().catch(() => "")) || "";
-          }
-        }
-        
+      // A field can already hold a value yet still violate its own min/max
+      // (e.g. "11" in a min="100" max="250" height field), or be a
+      // half-applied blood-pressure mask (e.g. a stray "170/" missing the
+      // second number) — neither is "empty" but both must still be
+      // corrected, or the site's validation error blocks submission forever.
+      const isIncompleteBp = await input.evaluate((el: HTMLInputElement | HTMLTextAreaElement) => {
+        const v = el.value.trim();
+        return v.includes("/") && !/^\d{2,3}\/\d{2,3}$/.test(v);
+      }).catch(() => false);
+      const needsFill = isEmpty || isIncompleteBp || !(await this.isWithinDeclaredBounds(input));
+      if (isVisible && needsFill) {
+        const questionText = await this.getNearbyQuestionText(input);
         const placeholder = (await input.getAttribute("placeholder")) || "";
         const name = (await input.getAttribute("name")) || "";
+        const inputMode = (await input.getAttribute("inputmode")) || "";
+        const hasNumericBounds =
+          (await input.getAttribute("min").catch(() => null)) !== null ||
+          (await input.getAttribute("max").catch(() => null)) !== null;
         const qTextLower = questionText.toLowerCase();
         const placeholderLower = placeholder.toLowerCase();
         const nameLower = name.toLowerCase();
+        // Some tenants render height/weight as a plain `type="text"` field
+        // with `inputmode="decimal"` and min/max attributes rather than a
+        // real number input — filling those with "None" or an out-of-range
+        // guess trips the field's own "Value should be between X and Y"
+        // validation, so route them through the same range-aware picker.
+        const isNumericTextField = inputMode === "decimal" || inputMode === "numeric" || hasNumericBounds;
 
-        if (/1\s*to\s*10|1-10/i.test(questionText) || /1\s*to\s*10|1-10/i.test(placeholder)) {
-          await input.fill("5");
+        // "Patient Information" fields (First/Last name, DOB, Postcode) can
+        // appear as a step inside the same questionnaire dialog — these are
+        // real identity fields, not generic questionnaire text, so they
+        // must use TEST_USER's real data rather than a placeholder answer.
+        const isDobField = qTextLower.includes("date of birth") || qTextLower.includes("dob");
+
+        if (placeholderLower.includes("full name") || qTextLower.includes("full name")) {
+          await input.fill(`${TEST_USER.firstName} ${TEST_USER.lastName}`);
+        } else if (
+          (placeholderLower.includes("first name") || qTextLower.includes("first name")) &&
+          !placeholderLower.includes("last") && !qTextLower.includes("last name")
+        ) {
+          await input.fill(TEST_USER.firstName);
+        } else if (placeholderLower.includes("last name") || qTextLower.includes("last name")) {
+          await input.fill(TEST_USER.lastName);
+        } else if (
+          placeholderLower.includes("postal code") ||
+          placeholderLower.includes("postcode") ||
+          qTextLower.includes("postal code") ||
+          qTextLower.includes("postcode")
+        ) {
+          await input.fill(TEST_USER.postcode);
+        } else if (isDobField && /^d+$/i.test(placeholder.trim())) {
+          await input.fill(TEST_USER.dob.day);
+        } else if (isDobField && /^m+$/i.test(placeholder.trim())) {
+          await input.fill(TEST_USER.dob.month);
+        } else if (isDobField && /^y+$/i.test(placeholder.trim())) {
+          await input.fill(TEST_USER.dob.year);
+        } else if (/1\s*to\s*10|1-10/i.test(questionText) || /1\s*to\s*10|1-10/i.test(placeholder)) {
+          await input.fill(await this.resolveNumericValue(input, questionText, placeholder, 5));
         } else if (placeholder.includes("___/___") || placeholder.includes("mmHg") || /blood\s*pressure/i.test(questionText) || /systolic/i.test(questionText)) {
-          await input.fill("120/80");
+          await this.fillBloodPressure(input);
         } else if (nameLower.includes("height") || placeholderLower.includes("height") || qTextLower.includes("height")) {
-          await input.fill("170");
+          await input.fill(await this.resolveNumericValue(input, questionText, placeholder, 170));
         } else if (nameLower.includes("weight") || placeholderLower.includes("weight") || qTextLower.includes("weight")) {
-          await input.fill("150");
+          await input.fill(await this.resolveNumericValue(input, questionText, placeholder, 150));
         } else if (placeholderLower.includes("occupation") || qTextLower.includes("occupation")) {
-          await input.fill("Office worker");
+          await input.fill(QUESTIONNAIRE_DEFAULTS.occupation);
+        } else if (isNumericTextField) {
+          await input.fill(await this.resolveNumericValue(input, questionText, placeholder, 150));
         } else {
-          await input.fill("None");
+          await input.fill(QUESTIONNAIRE_DEFAULTS.freeTextAnswer);
         }
         answeredAny = true;
       }
     }
 
     // 3. Handle Numerical inputs
-    const numInputs = this.page.locator('input[type="number"], input[inputmode="numeric"]');
+    const numInputs = this.page.locator(
+      'input[type="number"], input[inputmode="numeric"], input.ant-input-number-input',
+    );
     const numCount = await numInputs.count().catch(() => 0);
     for (let i = 0; i < numCount; i++) {
       const input = numInputs.nth(i);
       const isVisible = await input.isVisible().catch(() => false);
       const isEmpty = await input.evaluate((el: HTMLInputElement) => !el.value).catch(() => true);
-      if (isVisible && isEmpty) {
-        // Find question text context
-        const parentWrapper = this.page.locator('.questionnaire-answer-wrapper, .numerical-question-wrapper, .health-data-question-wrapper').filter({ has: input }).first();
-        let questionText = "";
-        if (await parentWrapper.count() > 0) {
-          const qLabel = parentWrapper.locator('.questions');
-          if (await qLabel.count() > 0) {
-            questionText = (await qLabel.first().textContent().catch(() => "")) || "";
-          }
-        }
-
+      const needsFill = isEmpty || !(await this.isWithinDeclaredBounds(input));
+      if (isVisible && needsFill) {
+        const questionText = await this.getNearbyQuestionText(input);
+        const placeholder = (await input.getAttribute("placeholder")) || "";
         const name = (await input.getAttribute("name") || "").toLowerCase();
-        const placeholder = (await input.getAttribute("placeholder") || "").toLowerCase();
+        const placeholderLower = placeholder.toLowerCase();
         const qTextLower = questionText.toLowerCase();
-        
-        let value = "150"; // Fallback to 150 (between 100-250) instead of 1
+
+        // Range hints (min/max attrs, or "between X and/to Y" phrasing like
+        // "Enter Number between 12 to 20") take priority over a fixed
+        // fallback guess, which can fall outside the field's own bounds.
+        let fallback = 150;
         if (/1\s*to\s*10|1-10/i.test(questionText) || /1\s*to\s*10|1-10/i.test(placeholder)) {
-          value = "5";
-        } else if (name.includes("height") || placeholder.includes("height") || qTextLower.includes("height")) {
-          value = "170";
-        } else if (name.includes("weight") || placeholder.includes("weight") || qTextLower.includes("weight")) {
-          value = "150"; // Weight in lbs (between 100-250) or kg (e.g. 75, but let's use 150 to satisfy 100-250)
+          fallback = 5;
+        } else if (name.includes("height") || placeholderLower.includes("height") || qTextLower.includes("height")) {
+          fallback = 170;
+        } else if (name.includes("weight") || placeholderLower.includes("weight") || qTextLower.includes("weight")) {
+          fallback = 150;
         }
+        const value = await this.resolveNumericValue(input, questionText, placeholder, fallback);
         await input.fill(value);
+        answeredAny = true;
+      }
+    }
+
+    // 3.5 Handle Gender radios (Patient Information step). These are
+    // deliberately excluded from the generic radio handlers below (which
+    // pick "No"/the last option — wrong for Male/Female), so without this
+    // they never get answered at all when this step appears inside the
+    // questionnaire dialog. Match TEST_USER.gender specifically.
+    const genderRadios = this.page.locator(
+      'input[type="radio"][name="gender"], input[type="radio"]#male, input[type="radio"]#female',
+    );
+    const genderCount = await genderRadios.count().catch(() => 0);
+    if (genderCount > 0) {
+      const genderChecked = await genderRadios
+        .evaluateAll((els) => els.some((el) => (el as HTMLInputElement).checked))
+        .catch(() => false);
+      if (!genderChecked) {
+        const targetLabel = TEST_USER.gender === "male" ? "Male" : "Female";
+        const targetRadio = this.page
+          .locator(
+            `label:has-text("${targetLabel}") input[type="radio"], input[type="radio"][value="${targetLabel}" i], input[type="radio"]#${TEST_USER.gender}`,
+          )
+          .first();
+        const clicked =
+          (await targetRadio.isVisible().catch(() => false)) &&
+          (await targetRadio
+            .check({ force: true })
+            .then(() => true)
+            .catch(() => false));
+        if (!clicked) {
+          await this.page
+            .locator(`label:has-text("${targetLabel}")`)
+            .first()
+            .click({ force: true })
+            .catch(() => {});
+        }
         answeredAny = true;
       }
     }
@@ -1387,11 +1713,34 @@ export class QuestionnairePage {
       const isVisible = await cb.isVisible().catch(() => false);
       const isChecked = await cb.isChecked().catch(() => false);
       if (isVisible && !isChecked) {
-        const parent = this.page.locator(`label:has(input[type="checkbox"])`).nth(i);
-        if (await parent.isVisible().catch(() => false)) {
-          await parent.click({ force: true });
+        // Checkbox groups (`.ant-checkbox-group`, "select at least one")
+        // often include a mutually-exclusive "Other"/"None of the above"
+        // option that unchecks its siblings via the site's own JS.
+        // Checking every option in the group fights that exclusivity —
+        // Sport gets checked, then Other gets checked and unchecks Sport,
+        // so next pass Sport looks unanswered again — forever. Once one
+        // option in a group is checked, leave the rest of that group alone.
+        const group = cb.locator(
+          'xpath=ancestor::*[contains(@class,"ant-checkbox-group")][1]',
+        );
+        const hasGroup = (await group.count().catch(() => 0)) > 0;
+        if (hasGroup) {
+          const alreadyAnsweredInGroup = await group
+            .locator('input[type="checkbox"]:checked')
+            .count()
+            .catch(() => 0);
+          if (alreadyAnsweredInGroup > 0) continue;
+        }
+
+        // Scope to THIS checkbox's own ancestor label (not a separately
+        // indexed label list, which can misalign and click the wrong box).
+        const parent = cb.locator("xpath=ancestor::label[1]").first();
+        if (await parent.count().catch(() => 0) > 0 && await parent.isVisible().catch(() => false)) {
+          await parent.click({ force: true }).catch(async () => {
+            await cb.check({ force: true }).catch(() => {});
+          });
         } else {
-          await cb.check({ force: true });
+          await cb.check({ force: true }).catch(() => {});
         }
         answeredAny = true;
       }
@@ -1407,7 +1756,7 @@ export class QuestionnairePage {
         if ((await selected.count().catch(() => 0)) > 0) {
           continue;
         }
-        
+
         const wrappers = group.locator(".ant-radio-wrapper, .ant-radio-button-wrapper");
         if ((await wrappers.count().catch(() => 0)) > 0) {
           await this.clickBestRadioOption(wrappers);
@@ -1428,13 +1777,22 @@ export class QuestionnairePage {
       const groupLoc = this.page.locator(`input[name="${name}"]`);
       const checkedLoc = this.page.locator(`input[name="${name}"]:checked`);
       if ((await checkedLoc.count().catch(() => 0)) === 0) {
-        const noOpt = groupLoc.filter({ hasText: /No|None/i });
-        if ((await noOpt.count().catch(() => 0)) > 0) {
-          await noOpt.first().click({ force: true });
-        } else {
-          await groupLoc.last().click({ force: true });
+        // Some tenants (e.g. Kepple Lane) render pre-answered safety-net
+        // questions as disabled radios — nothing to click, so skip them
+        // instead of force-clicking into a hung 15s timeout.
+        const noOpt = groupLoc
+          .filter({ hasText: /No|None/i })
+          .filter({ hasNot: this.page.locator("[disabled], [aria-disabled='true']") });
+        const target = (await noOpt.count().catch(() => 0)) > 0
+          ? noOpt.first()
+          : groupLoc.last();
+        const clickable =
+          (await target.isVisible().catch(() => false)) &&
+          (await target.isEnabled().catch(() => false));
+        if (clickable) {
+          await target.click({ force: true }).catch(() => {});
+          answeredAny = true;
         }
-        answeredAny = true;
       }
     }
 
@@ -1449,17 +1807,60 @@ export class QuestionnairePage {
           continue;
         }
         
+        // Identify this select by its nearby question title (stable across
+        // re-renders) so repeated failures can be tracked and capped —
+        // some selects (e.g. remote-search Pharmacy/GP Surgery lookups on
+        // this tenant) never populate any options at all, and without a
+        // cap this loop retries them forever until the test times out.
+        const selectKey = await select
+          .locator(
+            'xpath=ancestor::*[contains(@class,"hq-question")][1]//*[contains(@class,"hq-question__title")]',
+          )
+          .first()
+          .innerText()
+          .catch(() => `select-${i}`);
+        const priorAttempts = this.stuckSelectAttempts.get(selectKey) ?? 0;
+        if (priorAttempts >= 2) {
+          continue;
+        }
+
         console.log(`[QuestionnairePage] Clicking ant-select dropdown ${i + 1}`);
         await select.click({ force: true });
         await this.page.waitForTimeout(500); // Wait for options overlay to mount
-        
-        const options = this.page.locator(".ant-select-item-option:visible, .ant-select-item:visible");
-        const optionsCount = await options.count().catch(() => 0);
+
+        let options = this.page.locator(".ant-select-item-option:visible, .ant-select-item:visible");
+        let optionsCount = await options.count().catch(() => 0);
+
+        if (optionsCount === 0) {
+          // Some selects (e.g. remote-search Pharmacy/GP Surgery lookups)
+          // render no options at all until the user types a search term —
+          // clicking alone never mounts the options popup for these.
+          const searchInput = select
+            .locator('input[role="combobox"], input.ant-select-selection-search-input')
+            .first();
+          if (await searchInput.isVisible().catch(() => false)) {
+            await searchInput.fill("a").catch(() => {});
+            // Remote lookups (e.g. Pharmacy/GP Surgery search) can take a
+            // few seconds to respond — poll instead of guessing a fixed
+            // delay, resolving as soon as an option actually mounts.
+            options = this.page.locator(".ant-select-item-option:visible, .ant-select-item:visible");
+            await options
+              .first()
+              .waitFor({ state: "visible", timeout: 6_000 })
+              .catch(() => {});
+            optionsCount = await options.count().catch(() => 0);
+          }
+        }
+
         if (optionsCount > 0) {
           await options.first().click({ force: true });
           console.log(`[QuestionnairePage] Selected option for ant-select dropdown`);
           answeredAny = true;
         } else {
+          console.log(
+            `[QuestionnairePage] No options rendered in time for select "${selectKey}" (attempt ${priorAttempts + 1}); giving up after 2 attempts to avoid retrying forever`,
+          );
+          this.stuckSelectAttempts.set(selectKey, priorAttempts + 1);
           await this.page.locator("body").click({ force: true }).catch(() => {});
         }
         await this.page.waitForTimeout(300);
@@ -1674,24 +2075,32 @@ export class QuestionnairePage {
 
   private async clickPrimaryButton(): Promise<boolean> {
     const buttonSelectors = [
-      'button:has-text("Confirm")',
-      'button:has-text("Save")',
+      'button:has-text("Confirm"), [role="button"]:has-text("Confirm")',
+      'button:has-text("Save"), [role="button"]:has-text("Save")',
       'input[type="submit"][value="Confirm"]',
       'input[type="submit"][value="Save"]',
       'input[type="button"][value="Confirm"]',
       'input[type="button"][value="Save"]',
-      'button:has-text("Next")',
-      'button:has-text("Continue")',
-      'button:has-text("Submit")',
-      'button:has-text("Finish")',
+      'button:has-text("Next"), [role="button"]:has-text("Next")',
+      'button:has-text("Continue"), [role="button"]:has-text("Continue")',
+      'button:has-text("Submit"), [role="button"]:has-text("Submit")',
+      'button:has-text("Finish"), [role="button"]:has-text("Finish")',
       'button[type="submit"]',
     ];
 
     for (const sel of buttonSelectors) {
-      const btn = this.page.locator(sel).first();
-      if (await btn.isVisible().catch(() => false)) {
-        await btn.click({ force: true });
-        return true;
+      // Some tenants render a hidden duplicate (e.g. an SSR/skeleton
+      // placeholder) with identical text before the real, visible button.
+      // .first() would lock onto that hidden one and skip the selector
+      // entirely, so scan all matches for the first genuinely visible one.
+      const matches = this.page.locator(sel);
+      const count = await matches.count().catch(() => 0);
+      for (let i = 0; i < count; i++) {
+        const btn = matches.nth(i);
+        if (await btn.isVisible().catch(() => false)) {
+          await btn.click({ force: true });
+          return true;
+        }
       }
     }
     return false;
@@ -1707,25 +2116,55 @@ export class QuestionnairePage {
     let progressed = false;
 
     for (let attempt = 0; attempt < 5; attempt++) {
-      if (await this.isOnDrugSelectionPage()) {
-        return true;
-      }
+      // When the questionnaire renders as a modal dialog on top of the
+      // booking page (e.g. Kepple Lane), the background page's own markup
+      // (heading "Book: ...", `[class*="booking"]` wrappers) can falsely
+      // satisfy the checks below and make us bail out without ever
+      // clicking the dialog's Confirm/Continue button. Give the open
+      // dialog priority over those background-page signals.
+      const questionnaireDialogOpen = await this.isQuestionnaireDialogOpen();
 
-      if (await this.isOnPaymentPage()) {
-        return true;
-      }
-
+      // NHS 111 / "Book private consultation" can render either as its own
+      // popup or as the Result step inside the questionnaire dialog itself
+      // (e.g. Kepple Lane), so this must run regardless of dialogOpen state.
       const handledNHS111 = await this.handleNHS111Popup();
       if (handledNHS111) {
         return true;
       }
 
-      if (await this.isOnSignupOrBookingPage()) {
+      // "Self care" Result screen only offers "End assessment" (no private
+      // consultation option) — must be checked after handleNHS111Popup so
+      // "Book Private Consultation" still wins whenever both are present.
+      const handledSelfCare = await this.handleSelfCareResult();
+      if (handledSelfCare) {
         return true;
       }
 
-      if (await this.isOnThankYouPage()) {
-        return true;
+      if (!questionnaireDialogOpen) {
+        if (await this.isOnDrugSelectionPage()) {
+          return true;
+        }
+
+        if (await this.isOnPaymentPage()) {
+          return true;
+        }
+
+        if (await this.isOnSignupOrBookingPage()) {
+          return true;
+        }
+
+        if (await this.isOnThankYouPage()) {
+          return true;
+        }
+      } else {
+        // Progressive-disclosure dialogs (e.g. Kepple Lane) reveal the next
+        // question only after the current one is answered, and their
+        // "Continue"/"Confirm" button is inert until then. Re-fill any
+        // newly-visible fields on every attempt instead of relying on the
+        // single fillAllVisibleQuestions() pass that ran before this loop
+        // started — otherwise later questions never get answered and we
+        // just click a no-op button five times.
+        await this.fillAllVisibleQuestions().catch(() => false);
       }
 
       const clicked = await this.clickPrimaryButton();
@@ -1764,12 +2203,39 @@ export class QuestionnairePage {
   }
 
   /**
+   * True when the questionnaire renders as a modal dialog on top of the
+   * booking page (e.g. Kepple Lane) rather than as a standalone page.
+   */
+  private async isQuestionnaireDialogOpen(): Promise<boolean> {
+    return this.page
+      .locator(
+        // Exclude Next.js's own (permanently-mounted, normally hidden)
+        // dev-mode error overlay — its stack trace can coincidentally
+        // contain the word "Questionnaire" and falsely match here.
+        '[role="dialog"][aria-label*="questionnaire" i]:not([data-nextjs-dialog]), [role="dialog"]:has-text("Questionnaire"):not([data-nextjs-dialog])',
+      )
+      .first()
+      .isVisible()
+      .catch(() => false);
+  }
+
+  /**
    * Returns true if the current page looks like a questionnaire (has question UI elements).
    * Used by the spec to decide whether to run the questionnaire step.
    */
   async isOnQuestionnairePage(): Promise<boolean> {
     const questionnaireIndicators = [
+      // Modal-based questionnaire (e.g. Kepple Lane embeds it as a dialog
+      // inside the booking wizard rather than a standalone page).
+      '[role="dialog"][aria-label*="questionnaire" i]:not([data-nextjs-dialog])',
+      '[role="dialog"]:has-text("Questionnaire"):not([data-nextjs-dialog])',
       ".question-container",
+      // Legacy "hq-kit" questionnaire template (e.g. Kepple Lane's
+      // "personal-information-gathering" condition): a single-page form
+      // rendered inline, not a modal.
+      ".questionnaire-answer-box--kit",
+      ".hq-root",
+      ".hq-question",
       '[class*="question"]',
       '[class*="questionnaire"]',
       'button:has-text("Next")',
@@ -1849,16 +2315,28 @@ export class QuestionnairePage {
       .first();
 
     const popupVisible = await popupRoot.isVisible().catch(() => false);
-    const popupButton = this.page
-      .locator(
-        'button:has-text("Book Private Consultation"), a:has-text("Book Private Consultation")',
-      )
-      .first();
 
-    if (
-      !popupVisible &&
-      !(await popupButton.isVisible({ timeout: 1_500 }).catch(() => false))
-    ) {
+    // Some tenants render a hidden duplicate button with identical text
+    // (e.g. an SSR/skeleton placeholder) before the real, visible one —
+    // .first() would lock onto that hidden one, so scan all matches.
+    const popupButtonMatches = this.page.locator(
+      'button:has-text("Book Private Consultation"), a:has-text("Book Private Consultation")',
+    );
+    const popupButtonCount = await popupButtonMatches.count().catch(() => 0);
+    let popupButton: ReturnType<Page["locator"]> | null = null;
+    for (let i = 0; i < popupButtonCount; i++) {
+      const candidate = popupButtonMatches.nth(i);
+      if (await candidate.isVisible({ timeout: 300 }).catch(() => false)) {
+        popupButton = candidate;
+        break;
+      }
+    }
+
+    if (!popupVisible && !popupButton) {
+      return false;
+    }
+
+    if (!popupButton) {
       return false;
     }
 
@@ -1866,13 +2344,96 @@ export class QuestionnairePage {
       "[QuestionnairePage] NHS 111 popup detected — clicking Book Private Consultation",
     );
     await popupButton.scrollIntoViewIfNeeded().catch(() => {});
-    await popupButton.waitFor({ state: "visible", timeout: 10_000 });
     await popupButton.click({ force: true }).catch(async () => {
-      await popupButton.evaluate((el: HTMLElement) => el.click());
+      await popupButton!.evaluate((el: HTMLElement) => el.click());
     });
 
     await this.page.waitForLoadState("networkidle").catch(() => {});
     return true;
+  }
+
+  /**
+   * Terminal Result screens with no private-consultation option — e.g.
+   * "Self care" ("Your pharmacy cannot deal with this under their NHS
+   * contract... take care of the rash at home...") or "Assessment complete"
+   * ("A pharmacist will review your answers...") — only offer "End
+   * assessment". Rather than hardcoding every heading variant, just check
+   * for that button directly. Call this AFTER handleNHS111Popup() so "Book
+   * Private Consultation" still wins whenever both buttons are present.
+   */
+  private async handleSelfCareResult(): Promise<boolean> {
+    const bookPrivateVisible = await this.page
+      .locator(
+        'button:has-text("Book Private Consultation"), a:has-text("Book Private Consultation")',
+      )
+      .first()
+      .isVisible({ timeout: 300 })
+      .catch(() => false);
+    if (bookPrivateVisible) {
+      return false;
+    }
+
+    // Some tenants render a hidden duplicate button with identical text
+    // before the real, visible one — scan all matches instead of .first().
+    const endAssessmentMatches = this.page.locator(
+      'button:has-text("End assessment"), [role="button"]:has-text("End assessment")',
+    );
+    const count = await endAssessmentMatches.count().catch(() => 0);
+    for (let i = 0; i < count; i++) {
+      const btn = endAssessmentMatches.nth(i);
+      if (await btn.isVisible().catch(() => false)) {
+        console.log(
+          "[QuestionnairePage] Terminal result screen detected (no private-consultation option) — clicking End assessment",
+        );
+        await btn.scrollIntoViewIfNeeded().catch(() => {});
+        await btn.click({ force: true }).catch(async () => {
+          await btn.evaluate((el: HTMLElement) => el.click());
+        });
+        await this.page.waitForLoadState("networkidle").catch(() => {});
+        this.endedWithoutBooking = true;
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * "Age should be between X and Y" validation error (test patient's DOB
+   * falls outside the condition's allowed age range) — renders a
+   * "Back to Home" button, ending the assessment. Must be checked before
+   * isOnThankYouPage(), which also treats "Back to Home" as a generic
+   * success indicator and would otherwise silently bail without clicking.
+   */
+  private async handleAgeValidationError(): Promise<boolean> {
+    const errorVisible = await this.page
+      .locator('text=/Age should be between/i')
+      .first()
+      .isVisible({ timeout: 300 })
+      .catch(() => false);
+    if (!errorVisible) {
+      return false;
+    }
+
+    // Some tenants render a hidden duplicate button with identical text
+    // before the real, visible one — scan all matches instead of .first().
+    const backToHomeMatches = this.page.locator(
+      'button:has-text("Back to Home"), a:has-text("Back to Home"), [role="button"]:has-text("Back to Home")',
+    );
+    const count = await backToHomeMatches.count().catch(() => 0);
+    for (let i = 0; i < count; i++) {
+      const btn = backToHomeMatches.nth(i);
+      if (await btn.isVisible().catch(() => false)) {
+        await btn.scrollIntoViewIfNeeded().catch(() => {});
+        await btn.click({ force: true }).catch(async () => {
+          await btn.evaluate((el: HTMLElement) => el.click());
+        });
+        await this.page.waitForLoadState("networkidle").catch(() => {});
+        return true;
+      }
+    }
+
+    return false;
   }
 
   private async isOnPaymentPage(): Promise<boolean> {

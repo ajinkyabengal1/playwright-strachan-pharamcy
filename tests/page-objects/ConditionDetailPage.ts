@@ -57,7 +57,14 @@ export class ConditionDetailPage {
       'button:has-text("Book Appointment")',
       'a:has-text("Book Appointment")',
       'button:has-text("Book Now")',
-      'a:has-text("Book Now")'
+      'a:has-text("Book Now")',
+      // A previous run's saved progress can auto-resume straight into a
+      // later step, skipping the "Start Assessment" button entirely — none
+      // of that is a stuck page, so recognize those states too.
+      '[role="dialog"][aria-label*="questionnaire" i]',
+      '[role="dialog"]:has-text("questionnaire")',
+      'heading:has-text("Patient information")',
+      ':text("Patient information")',
     ];
 
     let pageReady = false;

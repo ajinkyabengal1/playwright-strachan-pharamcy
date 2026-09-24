@@ -127,6 +127,11 @@ const PHARMACY_SANITY_CONFIGS = {
     sanityBase: "https://ascai7ju.api.sanity.io/v2026-06-29/data/query/dev",
     query: SINGLE_CONDITION_QUERY,
   },
+  // ponytail: Kepple Lane's fixture points at localhost:4012 for local dev — mirror the same config under that host.
+  "localhost": {
+    sanityBase: "https://ascai7ju.api.sanity.io/v2026-06-29/data/query/dev",
+    query: SINGLE_CONDITION_QUERY,
+  },
 
   // ── Central Pharmacy (own Sanity project, raw query) ────────────────────────
   "central-pharmacy.vercel.app": {

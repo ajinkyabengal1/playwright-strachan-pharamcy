@@ -207,5 +207,5 @@ export interface PharmacyPreferences {
 }
 
 export const PHARMACY_PREFERENCES: PharmacyPreferences = {
-  preferredBranch: "strachans-two",
+  preferredBranch: "",
 };

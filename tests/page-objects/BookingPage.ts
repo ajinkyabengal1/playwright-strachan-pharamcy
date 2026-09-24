@@ -884,7 +884,66 @@ export class BookingPage {
       }
     }
 
+    await this.retryWithDifferentSlotIfAlreadyBooked(prefs);
     await this.clickBookAppointment();
     await this.handleBookingContinue();
+  }
+
+  /**
+   * Repeated test runs against the same local backend can exhaust the
+   * "soonest available" slot — a previous run already booked it, so the
+   * site shows "Appointment slot is booked already" and disables Continue
+   * indefinitely. Detect that and pick a different day's slot instead of
+   * getting stuck retrying the same unavailable one.
+   */
+  private async retryWithDifferentSlotIfAlreadyBooked(
+    prefs: BookingPreferences,
+  ): Promise<void> {
+    const alreadyBookedVisible = await this.page
+      .locator(':text("Appointment slot is booked already"), :text("slot is already booked"), :text("no longer available")')
+      .first()
+      .isVisible({ timeout: 500 })
+      .catch(() => false);
+    if (!alreadyBookedVisible) return;
+
+    console.log(
+      "[BookingPage] Soonest slot is already booked (from an earlier test run) — picking a different date instead",
+    );
+
+    // Skip the first enabled date cell — it's the same day as the
+    // already-booked quick-pick slot — and click the next enabled one.
+    const clicked = await this.page.evaluate((): boolean => {
+      const allButtons = Array.from(
+        document.querySelectorAll("button"),
+      ) as HTMLButtonElement[];
+      const dateCells = allButtons.filter((btn) => {
+        const disabled =
+          btn.disabled || btn.getAttribute("aria-disabled") === "true";
+        if (disabled) return false;
+        return (
+          btn.children.length >= 2 &&
+          btn.textContent &&
+          btn.textContent.length < 15
+        );
+      });
+      if (dateCells.length < 2) return false;
+      dateCells[1].click();
+      return true;
+    });
+
+    if (!clicked) {
+      console.log(
+        "[BookingPage] No alternate date cell found to retry with",
+      );
+      return;
+    }
+
+    await this.page.waitForTimeout(1200);
+    const slotSelected = await this.selectAvailableSlot(prefs);
+    if (!slotSelected) {
+      console.log(
+        "[BookingPage] No available time slot found on the alternate date",
+      );
+    }
   }
 }

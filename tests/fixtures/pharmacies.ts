@@ -23,7 +23,7 @@ export const PHARMACY_SITES: PharmacySite[] = [
   },
   {
     name: "Kepple Lane Pharmacy",
-    baseURL: "https://kepple-lane-pharmacy.vercel.app/",
+    baseURL: "http://localhost:4012",
     ciSkip: true,
   },
   {

@@ -59,6 +59,48 @@ async function detectCurrentStep(page: Page): Promise<JourneyStep> {
     return false;
   };
 
+  // -1. Patient Information fields, checked even before the dialog-priority
+  // check below. Some tenants (e.g. Kepple Lane) render "Patient Information"
+  // as one of several steps *inside* the same questionnaire dialog, and its
+  // own stepper can put that step before, after, or between the others —
+  // the dialog is generic across all of them, so classifying by "a dialog
+  // with the word questionnaire is open" would always win and this
+  // dedicated, better-tested sign_up handler (real TEST_USER data via
+  // SignupPage.fillNHSPDSForm) would never get a turn for this step.
+  //
+  // IMPORTANT: match only the actual form fields, never the step *label*
+  // text ("Patient Information") — that label lives in a persistent
+  // stepper breadcrumb shown on every step (Patient Info, Questionnaire,
+  // Booking alike), so text-matching it here would misclassify the other
+  // two steps as "sign_up" too.
+  const patientInfoIndicators = [
+    'input[name="first_name"]',
+    'input[name="last_name"]',
+    'input[name="postcode"]',
+    'input[placeholder*="first name" i]',
+    'input[placeholder*="last name" i]',
+    'input[placeholder*="postcode" i]',
+    'input[placeholder*="postal code" i]',
+  ];
+  if (await hasVisibleIndicator(patientInfoIndicators)) {
+    return "sign_up";
+  }
+
+  // 0. Questionnaire modal dialog — some tenants (e.g. Kepple Lane) embed the
+  // questionnaire as a role="dialog" overlay inside the booking wizard instead
+  // of a standalone page, so it must be checked before any background-page
+  // indicators below (signup fields etc. can still be visible underneath it).
+  const questionnaireDialogIndicators = [
+    // Exclude Next.js's own (permanently-mounted, normally hidden) dev-mode
+    // error overlay — its stack trace can coincidentally contain the word
+    // "Questionnaire" and falsely match here.
+    '[role="dialog"][aria-label*="questionnaire" i]:not([data-nextjs-dialog])',
+    '[role="dialog"]:has-text("Questionnaire"):not([data-nextjs-dialog])',
+  ];
+  if (await hasVisibleIndicator(questionnaireDialogIndicators)) {
+    return "questionnaire_submit";
+  }
+
   // 1. Cart step
   const cartIndicators = [
     "text=/shopping\\s*cart/i",
@@ -210,6 +252,12 @@ async function detectCurrentStep(page: Page): Promise<JourneyStep> {
     ':text("I do not have these symptoms")',
     ':text("I do have these symptoms")',
     'button:has-text("Next")',
+    // Legacy "hq-kit" questionnaire template (e.g. Kepple Lane's
+    // "personal-information-gathering" condition): a single-page form
+    // rendered inline, not a modal.
+    ".questionnaire-answer-box--kit",
+    ".hq-root",
+    ".hq-question",
     '[class*="question"]',
     '[class*="questionnaire"]',
     ".ant-picker",
@@ -222,6 +270,57 @@ async function detectCurrentStep(page: Page): Promise<JourneyStep> {
   // Avoid URL-only fallback here, otherwise payment can be misrouted as questionnaire.
 
   return "unknown";
+}
+
+/**
+ * Different tenants order their journey steps differently — e.g. "Patient
+ * Information → Questionnaire → Booking" vs "Questionnaire → Signup →
+ * Booking" — so the actual sequence must be read from the site's own step
+ * progress indicator rather than assumed. Logs a tagged line the dashboard
+ * picks up to replace its static "Journey Flow" guess with what this
+ * specific condition's page really shows, the moment that page opens.
+ * Cheap to call every iteration — no-ops after the first successful read.
+ */
+async function logJourneyFlowOnce(
+  page: Page,
+  state: { logged: boolean },
+): Promise<void> {
+  if (state.logged) return;
+
+  const stepLabels = await page
+    .evaluate(() => {
+      // A step-progress indicator renders a row of items, each pairing a
+      // small numbered circle with a short label (e.g. "1 Patient
+      // Information", "2 Questionnaire", "3 Booking"). Find the shallowest
+      // container whose direct children all follow that circle+label shape.
+      const candidates = Array.from(document.querySelectorAll("div"));
+      for (const container of candidates) {
+        const children = Array.from(container.children) as HTMLElement[];
+        if (children.length < 2 || children.length > 6) continue;
+
+        const labels: string[] = [];
+        for (const child of children) {
+          const circle = Array.from(child.querySelectorAll("div")).find(
+            (d) => /^\d+$/.test((d.textContent ?? "").trim()),
+          );
+          const label = child.querySelector("span");
+          const labelText = (label?.textContent ?? "").trim();
+          if (circle && labelText && labelText.length < 40) {
+            labels.push(labelText);
+          }
+        }
+        if (labels.length === children.length && labels.length >= 2) {
+          return labels;
+        }
+      }
+      return [] as string[];
+    })
+    .catch(() => [] as string[]);
+
+  if (stepLabels.length >= 2) {
+    state.logged = true;
+    console.log(`🗺️ JOURNEY_FLOW: ${stepLabels.join(" → ")}`);
+  }
 }
 
 // ─── Main test ────────────────────────────────────────────────────────────────
@@ -322,6 +421,7 @@ test.describe("Conditions flow", () => {
       }
 
       // Send to dashboard tracking API (fire-and-forget)
+      const apiCallSuccess = res.status() >= 200 && res.status() < 400;
       const trackPayload = {
         conditionId: conditionSlug,
         conditionName: conditionLabel,
@@ -336,9 +436,26 @@ test.describe("Conditions flow", () => {
           responseHeaders,
           responseBody,
           responseTime: new Date().toISOString(),
-          success: res.status() >= 200 && res.status() < 400,
+          success: apiCallSuccess,
         },
       };
+
+      // The generic response listener above only logs a bare
+      // "[HTTP status] url" line — surface a clearer, detailed failure for
+      // these specifically-tracked automation-critical endpoints directly
+      // in the console Output, since the dashboard's separate "API Calls"
+      // tab report is sent silently (fire-and-forget) and easy to miss.
+      if (!apiCallSuccess) {
+        const bodySnippet =
+          typeof responseBody === "string"
+            ? responseBody.slice(0, 300)
+            : responseBody
+              ? JSON.stringify(responseBody).slice(0, 300)
+              : "<no body>";
+        console.log(
+          `❌ API FAILED: ${pending.method} ${pending.url} → HTTP ${res.status()} (${duration}ms)\n   Response: ${bodySnippet}`,
+        );
+      }
 
       try {
         await fetch(`${DASHBOARD_URL}/api/track-api-call`, {
@@ -472,10 +589,12 @@ test.describe("Conditions flow", () => {
       const stepVisits: Record<string, number> = {};
       const MAX_STEP_VISITS = 6;
       let flowCompleted = false;
+      const journeyFlowLogState = { logged: false };
 
       for (let i = 0; i < MAX_ITERATIONS; i++) {
         if (flowCompleted) break;
         await page.waitForTimeout(1500);
+        await logJourneyFlowOnce(page, journeyFlowLogState);
 
         let step = await detectCurrentStep(page);
         console.log(`🔍 Iteration ${i + 1}: detected step = "${step}"`);
@@ -557,6 +676,18 @@ test.describe("Conditions flow", () => {
             console.log("→ Handling questionnaire step");
             await questionnaire.waitForPage();
             await questionnaire.answerAllQuestions();
+            // A terminal Result screen with no booking option (e.g. "Self
+            // care", "Assessment complete") ended via "End assessment" is a
+            // valid, successful outcome — a pharmacist reviews the answers
+            // instead of a booking being made — so count it as completed
+            // rather than failing the run for never reaching a booking.
+            if (questionnaire.endedWithoutBooking) {
+              console.log(
+                "✔ Assessment ended without booking (pharmacist review) — journey completed",
+              );
+              journeyStatus = "completed";
+              flowCompleted = true;
+            }
             break;
           }
 

@@ -2268,7 +2268,7 @@
                 <span class="flow-banner-icon">📋</span>
                 <div class="flow-banner-text">
                   <span class="flow-banner-label">Journey Flow</span>
-                  <span class="flow-banner-steps">Booking → Signup → Confirm</span>
+                  <span class="flow-banner-steps">Detected automatically when a test runs</span>
                 </div>
               `;
               suiteChildren.appendChild(flowBanner);
@@ -2479,6 +2479,17 @@
             appendLog(data, "log-start");
           } else if (type === "log") {
             appendLog(data, classifyLog(data));
+            // Different tenants order their journey steps differently, so
+            // the automation reads the site's own step-progress indicator
+            // live and tags the detected order with this marker. Replace
+            // the static "Journey Flow" guess with what this condition's
+            // page actually showed, the moment it's read.
+            const flowMatch = data.match(/JOURNEY_FLOW:\s*(.+)/);
+            if (flowMatch) {
+              document.querySelectorAll(".flow-banner-steps").forEach((el) => {
+                el.textContent = flowMatch[1].trim();
+              });
+            }
             // Update URL bar if we see a URL-like string
             const m = data.match(/https?:\/\/\S+/);
             if (m) {
