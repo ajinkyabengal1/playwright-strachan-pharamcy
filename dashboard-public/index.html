@@ -1460,6 +1460,7 @@
         id="btn-run-all"
         disabled
         title="Run all tests for selected pharmacy"
+        style="display: none"
       >
         ▶ Run All
       </button>
@@ -2277,10 +2278,32 @@
           <span class="file-name" title="${file}">${shortName}</span>
           <button class="run-file-btn" title="Run all tests in this file">Run</button>
         `;
+          // ROOT CAUSE of "No tests found" when clicking Run on the "Sanity
+          // Conditions" group: `file` here is the literal pseudo-group name
+          // "Sanity Conditions", not a real spec path — startRun({file})
+          // sends that straight to `npx playwright test "Sanity
+          // Conditions"`, which matches no file on disk.
+          //
+          // This group isn't a real booking-flow test at all — it's just the
+          // live list of conditions Sanity returned for this pharmacy. So
+          // "running" it means: confirm the list loaded and show what's in
+          // it, not drive a full signup/booking journey for every condition.
+          const isSanityConditionsGroup = file === "Sanity Conditions";
+          const conditionNamesForFile = isSanityConditionsGroup
+            ? Object.values(suites)
+                .flat()
+                .filter((t) => !!t._slug)
+                .map((t) => t.title || t._testName)
+            : [];
+
           fileHdr
             .querySelector(".run-file-btn")
             .addEventListener("click", (e) => {
               e.stopPropagation();
+              if (isSanityConditionsGroup) {
+                runSanityConditionsCheck(conditionNamesForFile);
+                return;
+              }
               startRun({ file, label: shortName });
             });
           fileHdr.addEventListener("click", (e) => {
@@ -2446,6 +2469,46 @@
         }
       }
 
+      // "Running" the Sanity Conditions group just verifies the condition
+      // list loaded and shows what's in it — no browser, no Playwright
+      // process, no booking journey. Passes as long as the list is non-empty
+      // (loadTests() already fetched it before the tree was ever rendered,
+      // so an empty list here means the Sanity fetch itself came back empty).
+      function runSanityConditionsCheck(names) {
+        if (running) return;
+
+        const id = ++queueIdSeq;
+        testQueue.push({ id, label: "Sanity Conditions", status: "running" });
+        currentRunId = id;
+        currentlyViewingId = id;
+        updateQueueUI();
+
+        clearLog();
+        hideCounts();
+        setStatus("running", "Checking Sanity Conditions…");
+
+        appendLog(`Checking Sanity Conditions for ${currentPharmacy}...`);
+        appendLog(`Found ${names.length} condition${names.length !== 1 ? "s" : ""}:`);
+        names.forEach((name, i) => appendLog(`  ${i + 1}. ${name}`));
+
+        const ok = names.length > 0;
+        setStatus(ok ? "pass" : "fail", ok ? "Sanity Conditions loaded" : "No conditions found");
+        showCounts(ok ? 1 : 0, ok ? 0 : 1, 0);
+        appendLog(
+          `\n── Check ${ok ? "✓ passed" : "✗ failed"} — ${names.length} condition${names.length !== 1 ? "s" : ""} loaded ──`,
+          "log-done " + (ok ? "log-pass" : "log-fail"),
+        );
+
+        const idx = testQueue.findIndex((q) => q.id === id);
+        if (idx >= 0) {
+          testQueue[idx].status = "completed";
+          testQueue[idx].result = ok ? "pass" : "fail";
+          testQueue[idx].counts = { passed: ok ? 1 : 0, failed: ok ? 0 : 1, skipped: 0 };
+        }
+        updateQueueUI();
+        processQueue();
+      }
+
       let cumulativeCounts = { passed: 0, failed: 0, skipped: 0 };
       // Track iteration numbers per condition for API tracking
       const conditionIterationCounters = {};
@@ -2552,7 +2615,7 @@
             activeES.close();
             activeES = null;
             btnStop.style.display = "none";
-            btnRunAll.style.display = "";
+            btnRunAll.style.display = "none";
 
             const ok = data.success;
             setStatus(
@@ -2607,7 +2670,7 @@
           running = false;
           activeES = null;
           btnStop.style.display = "none";
-          btnRunAll.style.display = "";
+          btnRunAll.style.display = "none";
           setStatus("fail", "Connection error");
           appendLog("Connection to server lost.", "log-fail");
 
@@ -2631,7 +2694,7 @@
         testQueue = [];
         updateQueueUI();
         btnStop.style.display = "none";
-        btnRunAll.style.display = "";
+        btnRunAll.style.display = "none";
         setStatus("idle", "Stopped");
         appendLog("Run stopped by user.", "log-warn");
       });

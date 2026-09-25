@@ -3,6 +3,7 @@ const { spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const https = require("https");
+const http = require("http");
 
 function httpGetJson(url) {
   return new Promise((resolve, reject) => {
@@ -15,6 +16,55 @@ function httpGetJson(url) {
       });
     }).on("error", reject);
   });
+}
+
+function httpGetText(url) {
+  const client = url.startsWith("http://") ? http : https;
+  return new Promise((resolve, reject) => {
+    client.get(url, (res) => {
+      let raw = "";
+      res.on("data", (c) => (raw += c));
+      res.on("end", () => resolve(raw));
+    }).on("error", reject);
+  });
+}
+
+// Auto-discovers a new pharmacy's Sanity project without needing a manual
+// PHARMACY_SANITY_CONFIGS entry: every one of these Next.js/Sanity sites
+// embeds its own `projectId`/`dataset` right in the homepage HTML (inside
+// the client component payload) — e.g. `\"projectId\":\"fsri74r8\"`. Strip
+// backslashes (the value is JSON-escaped twice in that payload) and pull
+// both out with a plain regex. Cached per hostname so adding one pharmacy
+// to pharmacies.ts doesn't re-scrape its homepage on every dashboard click.
+const discoveredSanityConfigCache = new Map();
+
+async function discoverSanityConfig(baseURL) {
+  let hostname;
+  try { hostname = new URL(baseURL).hostname; } catch (_) { return null; }
+
+  if (discoveredSanityConfigCache.has(hostname)) {
+    return discoveredSanityConfigCache.get(hostname);
+  }
+
+  let config = null;
+  try {
+    const html = await httpGetText(baseURL);
+    const clean = html.replace(/\\/g, "");
+    const projectId = clean.match(/projectId"\s*:\s*"([a-zA-Z0-9]+)"/)?.[1];
+    const dataset = clean.match(/dataset"\s*:\s*"([a-zA-Z0-9_-]+)"/)?.[1];
+    if (projectId && dataset) {
+      config = {
+        sanityBase: `https://${projectId}.api.sanity.io/v2026-06-29/data/query/${dataset}`,
+        query: SINGLE_CONDITION_QUERY,
+      };
+    }
+  } catch (_) {
+    // Site unreachable / not a Sanity-backed site — cache the miss too so
+    // we don't retry a dead host on every request.
+  }
+
+  discoveredSanityConfigCache.set(hostname, config);
+  return config;
 }
 
 const app = express();
@@ -391,7 +441,8 @@ app.get("/api/sanity-conditions", async (req, res) => {
       let hostname;
       try { hostname = new URL(baseURL).hostname; } catch (_) {}
 
-      const config = hostname && PHARMACY_SANITY_CONFIGS[hostname];
+      let config = hostname && PHARMACY_SANITY_CONFIGS[hostname];
+      if (!config) config = await discoverSanityConfig(baseURL);
       if (!config) return res.json({ result: [] });
 
       if (config.corporateId != null) {
@@ -452,7 +503,8 @@ app.get("/api/branches", async (req, res) => {
 
     let hostname;
     try { hostname = new URL(baseURL).hostname; } catch (_) {}
-    const config = hostname && PHARMACY_SANITY_CONFIGS[hostname];
+    let config = hostname && PHARMACY_SANITY_CONFIGS[hostname];
+    if (!config) config = await discoverSanityConfig(baseURL);
     if (!config) return res.json({ branches: [] });
 
     // Branches are Sanity "pharmacies" docs — auto-detected per pharmacy project
