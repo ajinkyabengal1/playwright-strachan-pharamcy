@@ -323,6 +323,56 @@ async function logJourneyFlowOnce(
   }
 }
 
+/**
+ * When the journey doesn't complete, a bare "Expected true, Received false"
+ * leaves no clue why. Check the page for known, common stopping points and
+ * return a specific, human-readable reason instead — e.g. reaching a real
+ * card-payment step, which requires a real card/3D-Secure and is an
+ * expected automation boundary, not a bug to chase.
+ */
+async function diagnoseIncompleteJourney(page: Page): Promise<string> {
+  const paymentIndicators = [
+    ':text("Complete your payment")',
+    ':text("Enter your card details")',
+    'input[autocomplete="cc-number"]',
+    ':text("Pass challenge")',
+    ':text("3dsecure.io")',
+  ];
+  for (const sel of paymentIndicators) {
+    if (await page.locator(sel).first().isVisible({ timeout: 300 }).catch(() => false)) {
+      return (
+        "Reached the payment step (\"Complete your payment\") — this requires " +
+        "entering a real card and completing 3D-Secure, which automation " +
+        "cannot do. This is an expected stopping point for paid conditions, " +
+        "not a bug in the automation."
+      );
+    }
+  }
+
+  const alreadyBookedVisible = await page
+    .locator(':text("Appointment slot is booked already"), :text("slot is already booked")')
+    .first()
+    .isVisible({ timeout: 300 })
+    .catch(() => false);
+  if (alreadyBookedVisible) {
+    return (
+      "The selected appointment slot was already booked (likely from an " +
+      "earlier test run against this same local backend) and the retry " +
+      "to a different slot did not complete in time."
+    );
+  }
+
+  const heading = await page
+    .locator("h1, h2, h3")
+    .first()
+    .textContent({ timeout: 300 })
+    .catch(() => null);
+  return (
+    `Stopped on an unrecognized page (heading: "${(heading ?? "").trim() || "none visible"}", ` +
+    `url: ${page.url()}) — no known reason matched.`
+  );
+}
+
 // ─── Main test ────────────────────────────────────────────────────────────────
 test.describe("Conditions flow", () => {
   test("complete conditions flow: Booking Page → signup → confirm page", async ({
@@ -834,6 +884,10 @@ test.describe("Conditions flow", () => {
       console.log(
         `✔ Final verification: ${isConfirmed ? "COMPLETED SUCCESSFUL" : "INCOMPLETE"}`,
       );
+      if (!isConfirmed) {
+        const reason = await diagnoseIncompleteJourney(page);
+        console.log(`❌ Journey incomplete — reason: ${reason}`);
+      }
       expect(isConfirmed).toBe(true);
       if (isConfirmed) {
         console.log(

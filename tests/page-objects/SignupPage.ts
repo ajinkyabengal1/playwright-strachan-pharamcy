@@ -809,9 +809,24 @@ export class SignupPage {
     if (await phoneInput.isVisible().catch(() => false)) {
       await phoneInput.scrollIntoViewIfNeeded().catch(() => {});
       await phoneInput.click();
+      // ROOT CAUSE (observed: phone field ends up holding the number typed
+      // 7x concatenated back-to-back, one copy per retry loop iteration):
+      // this only sent "Control+a", which on macOS Chromium does NOT
+      // select-all in a text input (that's an emacs "move to line start"
+      // binding there) — only "Meta+a" (Cmd+A) does. Select-all silently
+      // selected nothing, Backspace deleted at most one character, and
+      // pressSequentially() then appended the new digits after whatever was
+      // still there. Because the appended value fails the site's own phone
+      // validation, the form never submits, so the outer step loop retries
+      // this same fill on every iteration — appending again each time.
       await phoneInput.press("Control+a");
+      await phoneInput.press("Meta+a");
       await this.page.waitForTimeout(50);
       await phoneInput.press("Backspace");
+      // Belt-and-braces: some masked/controlled phone inputs ignore
+      // keyboard-driven select-all entirely — force the underlying value
+      // empty too before typing the real digits.
+      await phoneInput.fill("").catch(() => {});
       await this.page.waitForTimeout(80);
       await phoneInput.pressSequentially(normalizedPhone, { delay: 60 });
       await this.page.waitForTimeout(150);

@@ -1702,6 +1702,54 @@
               </div>
             </div>
 
+            <!-- Questionnaire -->
+            <div
+              class="td-section"
+              style="
+                background: var(--clr-surface);
+                border: 1px solid var(--clr-border);
+                border-radius: 10px;
+                margin-bottom: 20px;
+                overflow: hidden;
+              "
+            >
+              <div
+                class="td-section-header"
+                onclick="this.parentElement.classList.toggle('collapsed')"
+                style="
+                  background: var(--clr-surface);
+                  padding: 14px 20px;
+                  font-weight: 600;
+                  font-size: 14px;
+                  cursor: pointer;
+                "
+              >
+                📝 Questionnaire Fill Mode
+              </div>
+              <div
+                class="td-section-body"
+                style="padding: 20px; display: flex; gap: 24px;"
+              >
+                <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                  <input
+                    type="radio"
+                    name="questionnaireFillMode"
+                    value="fill-all"
+                    checked
+                  />
+                  Fill all questions (default)
+                </label>
+                <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                  <input
+                    type="radio"
+                    name="questionnaireFillMode"
+                    value="required-only"
+                  />
+                  Fill only required (*) questions
+                </label>
+              </div>
+            </div>
+
             <!-- Appointment -->
             <div
               class="td-section"
@@ -2661,6 +2709,10 @@
           testdataForm.elements["dobYear"].value = u.dobYear || "";
           testdataForm.elements["guardianName"].value = u.guardianName || "";
 
+          const q = currentTestData.questionnaire || {};
+          const fillModeRadios = testdataForm.elements["questionnaireFillMode"];
+          if (fillModeRadios) fillModeRadios.value = q.fillMode || "fill-all";
+
           testdataForm.elements["appointmentType"].value =
             b.appointmentType || "Video";
           testdataForm.elements["useNextAvailableSlot"].checked =
@@ -2690,6 +2742,10 @@
         u.dobMonth = testdataForm.elements["dobMonth"].value;
         u.dobYear = testdataForm.elements["dobYear"].value;
         u.guardianName = testdataForm.elements["guardianName"].value;
+
+        currentTestData.questionnaire = {
+          fillMode: testdataForm.elements["questionnaireFillMode"].value,
+        };
 
         b.appointmentType = testdataForm.elements["appointmentType"].value;
         b.useNextAvailableSlot =

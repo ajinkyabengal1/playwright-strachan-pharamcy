@@ -60,6 +60,27 @@ export class BookingPage {
   }
 
   /**
+   * True when the page has already moved past the slot-selection UI (e.g. a
+   * branch switch auto-advanced to Patient Information, or a slot was
+   * already implicitly confirmed) — the slot-selection strategies would
+   * otherwise search for a picker that's no longer there and throw.
+   */
+  private async isPastBookingStep(): Promise<boolean> {
+    const indicators = [
+      'heading:has-text("Patient information")',
+      'heading:has-text("Patient Information")',
+      'input[placeholder*="first name" i]',
+      'input[name="first_name"]',
+    ];
+    for (const sel of indicators) {
+      if (await this.page.locator(sel).first().isVisible({ timeout: 300 }).catch(() => false)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
    * Wait for the booking page to be ready.
    * Detects the appointment type selector, slot picker, or instant "Book Now" button.
    */
@@ -492,6 +513,15 @@ export class BookingPage {
         );
         if (!enabled) continue;
 
+        // The broad `button:has-text("Book")` pattern above also matches
+        // "Book this slot" — the slot-*selection* button, already clicked
+        // by clickNextAvailableSlotRadio()/selectAvailableSlot(), never the
+        // final confirm action. Re-clicking it here does nothing (no real
+        // "confirm" happens), so the page never advances and the outer
+        // journey loop just repeats this step forever. Skip it and keep
+        // scanning for the real CTA.
+        if (/book\s+this\s+slot/i.test(text)) continue;
+
         await btn.scrollIntoViewIfNeeded().catch(() => {});
         await btn.click({ force: true });
         await this.page.waitForTimeout(1500);
@@ -507,6 +537,10 @@ export class BookingPage {
 
       const preferred = buttons.find((button) => {
         const text = (button.textContent ?? "").trim().toLowerCase();
+        // "Book this slot" is the slot-*selection* button, not the final
+        // confirm action — clicking it again does nothing and leaves the
+        // page stuck (see the comment above this fallback's caller).
+        if (text.includes("book this slot")) return false;
         return (
           !button.disabled &&
           (text.includes("book") ||
@@ -565,7 +599,13 @@ export class BookingPage {
       .first();
 
     if (await continueBtn.isVisible({ timeout: 5_000 }).catch(() => false)) {
-      await continueBtn.click();
+      // A genuinely-disabled Continue (e.g. still waiting on a real card
+      // payment) is an expected stopping point, not a bug — check enabled
+      // first and cap the click at a short timeout so this fails fast
+      // instead of hanging for the full 15s default actionTimeout.
+      const enabled = await continueBtn.isEnabled().catch(() => false);
+      if (!enabled) return false;
+      await continueBtn.click({ timeout: 3_000 }).catch(() => {});
       await this.page.waitForTimeout(1500);
       return true;
     }
@@ -817,10 +857,31 @@ export class BookingPage {
   ) {
     await this.waitForPage();
     await this.selectPreferredBranch(pharmacyPrefs);
+
+    // Switching branch can itself auto-advance the page straight past
+    // booking (e.g. re-confirming a slot that was already implicitly
+    // selected) — if Patient Information is already showing, the slot
+    // strategies below would search for a picker that's no longer there,
+    // exhaust every fallback, and throw, crashing the test one step before
+    // it would otherwise have reached (and correctly filled) that form.
+    if (await this.isPastBookingStep()) {
+      console.log(
+        "✔ Already past the booking step (branch change auto-advanced) — skipping slot selection",
+      );
+      return;
+    }
+
     await this.selectPreferredSessionType(prefs);
 
     // Brief pause for any dynamic content to load after session type selection
     await this.page.waitForTimeout(2000);
+
+    if (await this.isPastBookingStep()) {
+      console.log(
+        "✔ Already past the booking step after session-type selection — skipping slot selection",
+      );
+      return;
+    }
 
     // Attempt instant "Book Now" path (simplest)
     const bookedInstant = await this.clickBookNow();
@@ -841,11 +902,21 @@ export class BookingPage {
         console.log(
           "ℹ 'Select next available slot' radio button not found — falling back to first enabled date selection",
         );
-        const dateSelected = await this.selectFirstEnabledDate(prefs);
+        // useNextAvailableSlot means "grab whatever is soonest" — a
+        // hardcoded preferredMonth/preferredDate in config (e.g. a past
+        // month left over from when the test data was written) would
+        // otherwise force navigation to a month with zero available dates
+        // and fail outright. Ignore those and just take the first slot.
+        const fallbackPrefs: BookingPreferences = {
+          ...prefs,
+          preferredMonth: undefined,
+          preferredDate: undefined,
+        };
+        const dateSelected = await this.selectFirstEnabledDate(fallbackPrefs);
         if (!dateSelected) {
           throw new Error("No available dates found during fallback");
         }
-        const slotSelected = await this.selectAvailableSlot(prefs);
+        const slotSelected = await this.selectAvailableSlot(fallbackPrefs);
         if (!slotSelected) {
           throw new Error("No available time slots found during fallback");
         }

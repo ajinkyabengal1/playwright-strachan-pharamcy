@@ -1,15 +1,15 @@
 export const TEST_USER = {
   gender: "male" as "male" | "female",
   dob: {
-    day: "15",
+    day: "17",
     month: "04",
     year: "1962",
     /** ISO format used by Ant Design DatePicker */
-    iso: "1962-04-15",
+    iso: "1962-04-17",
     /** Display format: DD/MM/YYYY */
-    display: "15/04/1962",
+    display: "17/04/1962",
   },
-  firstName: "Lloyd",
+  firstName: "mikes",
   lastName: "PEENEY",
   postcode: "HD59LT",
   genderValue: "male",
@@ -19,6 +19,16 @@ export const TEST_USER = {
   password: "Test@1234",
   confirmPassword: "Test@1234",
 };
+
+/**
+ * "fill-all": fill every question, required or not (existing default behavior).
+ * "required-only": skip questions without the "*" required marker, leave them blank.
+ */
+export type QuestionnaireFillMode = "fill-all" | "required-only";
+
+export const QUESTIONNAIRE_FILL_MODE: QuestionnaireFillMode =
+  (process.env.QUESTIONNAIRE_FILL_MODE as QuestionnaireFillMode) ||
+  ("fill-all" as QuestionnaireFillMode);
 
 export type ConditionJourneyType = "nhs" | "private" | "lifestyle";
 

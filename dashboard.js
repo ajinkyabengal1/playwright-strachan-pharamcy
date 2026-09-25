@@ -207,6 +207,9 @@ function readTestData() {
       dobYear: get("year"),
     },
     condition: { journeyType },
+    questionnaire: {
+      fillMode: get("QUESTIONNAIRE_FILL_MODE") || "fill-all",
+    },
     booking: {
       appointmentType: get("appointmentType"),
       useNextAvailableSlot: getBool("useNextAvailableSlot"),
@@ -255,6 +258,9 @@ function writeTestData(data) {
   const display = `${u.dobDay.padStart(2, "0")}/${u.dobMonth.padStart(2, "0")}/${u.dobYear}`;
   src = src.replace(/(iso:\s*)"[^"]*"/, `$1"${iso}"`);
   src = src.replace(/(display:\s*)"[^"]*"/, `$1"${display}"`);
+
+  const q = data.questionnaire || {};
+  if (q.fillMode) setStr("QUESTIONNAIRE_FILL_MODE", q.fillMode);
 
   const b = data.booking;
   setStr("appointmentType", b.appointmentType);
@@ -580,6 +586,19 @@ app.get("/api/run-tests", (req, res) => {
     const failed = (stdout.match(/\d+ failed/)?.[0] || "").trim();
     const skipped = (stdout.match(/\d+ skipped/)?.[0] || "").trim();
     const artifacts = findArtifactsAfter(runStartTime - 1000);
+
+    // The automation's own diagnosis of *why* the journey didn't complete
+    // (e.g. "reached the payment step") is logged mid-run, before
+    // Playwright's own error block/stack/attachments — so it gets buried
+    // above the noisiest part of a failing run. Re-print it as the very
+    // last line so it's the last thing visible in the Output panel.
+    if (code !== 0) {
+      const reasonMatch = stdout.match(/❌ Journey incomplete — reason: (.+)/);
+      if (reasonMatch) {
+        send("log", `\n❌ Journey incomplete — reason: ${reasonMatch[1].trim()}`);
+      }
+    }
+
     send("done", { code, passed, failed, skipped, success: code === 0, artifacts });
     res.end();
   });

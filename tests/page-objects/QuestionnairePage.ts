@@ -1,5 +1,9 @@
-import { Page } from "@playwright/test";
-import { getActiveConditionName, TEST_USER } from "../fixtures/test-data";
+import { Page, Locator } from "@playwright/test";
+import {
+  getActiveConditionName,
+  TEST_USER,
+  QUESTIONNAIRE_FILL_MODE,
+} from "../fixtures/test-data";
 import {
   ERECTILE_DYSFUNCTION_RULES,
   SHINGLES_RULES,
@@ -36,6 +40,111 @@ export class QuestionnairePage {
    * the run for never reaching a booking confirmation.
    */
   endedWithoutBooking = false;
+
+  /**
+   * "required-only": generic questionnaire-content loops in
+   * fillVisibleQuestionsOnce() skip any question without a required marker
+   * (site's own "*"/required-question class), leaving it blank. Identity
+   * fields (name/DOB/postcode/gender) are always filled regardless — they're
+   * excluded from those loops already, not gated by this flag.
+   */
+  private readonly fillMode = QUESTIONNAIRE_FILL_MODE;
+
+  /**
+   * Walks up from a control to its nearest question wrapper and checks for
+   * a required marker. Different tenants render this differently
+   * (`.required-question` class, `.hq-question__required` class, or a
+   * literal "*" in the question title) — checked all three, so unknown/odd
+   * markup fails safe to "required" (still filled) rather than silently
+   * skipping real required questions.
+   */
+  private async isControlRequired(control: Locator): Promise<boolean> {
+    const wrapper = control
+      .locator(
+        'xpath=ancestor::*[contains(@class,"hq-question") or contains(@class,"questionnaire-answer-wrapper") or contains(@class,"question-container")][1]',
+      )
+      .first();
+    const hasWrapper = (await wrapper.count().catch(() => 0)) > 0;
+    if (!hasWrapper) return true;
+    const html = await wrapper.innerHTML().catch(() => null);
+    if (html === null) return true;
+    return (
+      /required-question|hq-question__required|question-required/.test(html) ||
+      /class="[^"]*\brequired\b[^"]*"/.test(html) ||
+      /[*]\s*(<|$)/.test(html)
+    );
+  }
+
+  /** true = leave this control blank (fillMode is "required-only" and it isn't marked required) */
+  private async shouldSkipOptional(control: Locator): Promise<boolean> {
+    if (this.fillMode !== "required-only") return false;
+    return !(await this.isControlRequired(control));
+  }
+
+  /**
+   * Resolves which TEST_USER.dob part (day/month/year) a single box of a
+   * split DOB field should get.
+   *
+   * ROOT CAUSE (screenshot: DOB boxes filled "15 / 15 / 150"): the previous
+   * logic only recognized day/month/year by an exact placeholder match
+   * (`/^d+$/i` etc, i.e. literal "DD"/"MM"/"YYYY"). Tenants whose boxes have
+   * no placeholder — or a different one ("Day"/empty/etc) — fell through
+   * every DOB branch into the generic numeric-field fallback, which filled
+   * all three with `resolveNumericValue(...)`'s clamped/default guesses
+   * instead of the real date. Each retry pass also re-attempted the same
+   * wrong fill (site's DOB validation never clears it), which is what made
+   * this field take "too much time".
+   *
+   * Fix: keep the placeholder check first (cheap, exact), then fall back to
+   * this box's position among its own DOB-question sibling inputs — day,
+   * month, year, in that DOM order — which holds regardless of placeholder
+   * wording.
+   */
+  private async resolveDobPart(
+    input: Locator,
+    placeholder: string,
+  ): Promise<string> {
+    const p = placeholder.trim();
+    if (/^d+$/i.test(p) || /\bday\b/i.test(p)) return TEST_USER.dob.day;
+    if (/^m+$/i.test(p) || /\bmonth\b/i.test(p)) return TEST_USER.dob.month;
+    if (/^y+$/i.test(p) || /\byear\b/i.test(p)) return TEST_USER.dob.year;
+
+    const wrapper = input
+      .locator(
+        'xpath=ancestor::*[contains(@class,"hq-question") or contains(@class,"questionnaire-answer-wrapper") or contains(@class,"question-container")][1]',
+      )
+      .first();
+    const wrapperHandle = (await wrapper.count().catch(() => 0)) > 0
+      ? await wrapper.elementHandle().catch(() => null)
+      : null;
+    const inputHandle = await input.elementHandle().catch(() => null);
+
+    let index = 0;
+    if (wrapperHandle && inputHandle) {
+      index = await this.page
+        .evaluate(
+          ({ wrapperEl, inputEl }) => {
+            const inputs = Array.from(
+              (wrapperEl as HTMLElement).querySelectorAll("input"),
+            ).filter(
+              (el) =>
+                !["hidden", "checkbox", "radio"].includes(
+                  (el as HTMLInputElement).type,
+                ),
+            );
+            return inputs.indexOf(inputEl as HTMLInputElement);
+          },
+          { wrapperEl: wrapperHandle, inputEl: inputHandle },
+        )
+        .catch(() => 0);
+    }
+
+    return index === 1
+      ? TEST_USER.dob.month
+      : index === 2
+        ? TEST_USER.dob.year
+        : TEST_USER.dob.day;
+  }
 
   constructor(page: Page) {
     this.page = page;
@@ -90,6 +199,16 @@ export class QuestionnairePage {
    * Then click Next/Continue/Submit.
    */
   async answerAllQuestions() {
+    // Once nothing changes for a few consecutive steps, further looping is
+    // pure waste — each pass re-scans the entire page (selects, dates,
+    // radios, checkboxes, etc.) even when there is nothing left to fill,
+    // and the loop otherwise only exits early on a handful of specific
+    // terminal conditions (thank-you, drug-selection, signup, dialog
+    // closed). Without this, a fully-answered form still burns out the
+    // full MAX_QUESTIONS budget at ~100-150ms per empty pass.
+    let noProgressStreak = 0;
+    const MAX_NO_PROGRESS_STREAK = 3;
+
     for (let step = 0; step < this.MAX_QUESTIONS; step++) {
       await this.page.waitForTimeout(200); // brief pause for animations
 
@@ -164,6 +283,16 @@ export class QuestionnairePage {
           if (await this.isOnSignupOrBookingPage()) return;
         }
         if (!(await this.isOnQuestionnairePage())) return;
+
+        noProgressStreak++;
+        if (noProgressStreak >= MAX_NO_PROGRESS_STREAK) {
+          console.log(
+            `[QuestionnairePage] No progress for ${MAX_NO_PROGRESS_STREAK} consecutive steps — exiting early instead of exhausting all ${this.MAX_QUESTIONS}`,
+          );
+          return;
+        }
+      } else {
+        noProgressStreak = 0;
       }
     }
   }
@@ -1397,6 +1526,54 @@ export class QuestionnairePage {
   private async fillVisibleQuestionsOnce(): Promise<boolean> {
     let answeredAny = false;
 
+    // 0. Handle split "Date of birth" boxes (3 separate day/month/year inputs).
+    //
+    // ROOT CAUSE of the "17/70/150" / "15/15/150" garbage and the field
+    // taking forever: detection was done PER INPUT, walking up to that
+    // input's *own* nearest `.hq-question` ancestor to read a title. On
+    // this tenant, only the first (day) box's own wrapper actually carries
+    // the "Date of birth" title text — the month/year boxes' wrappers don't
+    // repeat it — so only the day box was ever recognized as DOB; month and
+    // year silently fell through to the generic numeric-fallback branches
+    // (clamped-bounds guess / flat default), which never satisfies the
+    // site's date validation, so every one of the (up to 4) re-scan passes
+    // retried the same wrong fill — that's the slowness.
+    //
+    // Fix: detect the group from the HEADING side instead of per-input —
+    // walk up from the "Date of birth" text to the nearest ancestor that
+    // contains at least 2 real inputs (i.e. the shared group container,
+    // however many individual mini-wrappers it has inside), then fill all
+    // of them by position in one shot. This also fixes it before the
+    // generic loops below ever see these boxes, so isWithinDeclaredBounds
+    // is satisfied on the first pass and nothing retries.
+    const dobHeading = this.page.locator(':text("Date of birth")').first();
+    if (await dobHeading.count().catch(() => 0)) {
+      const dobGroup = dobHeading
+        .locator(
+          'xpath=ancestor::*[count(.//input[not(@type="hidden") and not(@type="checkbox") and not(@type="radio")]) >= 2][1]',
+        )
+        .first();
+      if (await dobGroup.count().catch(() => 0)) {
+        const dobBoxes = dobGroup.locator(
+          'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])',
+        );
+        const dobBoxCount = await dobBoxes.count().catch(() => 0);
+        const dobValues = [
+          TEST_USER.dob.day,
+          TEST_USER.dob.month,
+          TEST_USER.dob.year,
+        ];
+        for (let i = 0; i < Math.min(dobBoxCount, 3); i++) {
+          const box = dobBoxes.nth(i);
+          if (!(await box.isVisible().catch(() => false))) continue;
+          const current = (await box.inputValue().catch(() => "")).trim();
+          if (current === dobValues[i]) continue;
+          await box.fill(dobValues[i]).catch(() => {});
+          answeredAny = true;
+        }
+      }
+    }
+
     // 1. Handle Date/Range Pickers
     const rangePickers = this.page.locator(".ant-picker-range");
     const rangePickerCount = await rangePickers.count().catch(() => 0);
@@ -1409,6 +1586,9 @@ export class QuestionnairePage {
         const isStartEmpty = startVal === "" || startVal === "DD-MM-YYYY" || startVal === "YYYY-MM-DD" || startVal === "DD/MM/YYYY";
         const isEndEmpty = endVal === "" || endVal === "DD-MM-YYYY" || endVal === "YYYY-MM-DD" || endVal === "DD/MM/YYYY";
         
+        if ((isStartEmpty || isEndEmpty) && (await this.shouldSkipOptional(picker))) {
+          continue;
+        }
         if (isStartEmpty || isEndEmpty) {
           console.log("[QuestionnairePage] Opening range picker dropdown by clicking start input...");
           await inputs.nth(0).click({ force: true });
@@ -1512,6 +1692,7 @@ export class QuestionnairePage {
         return !val || val === "DD-MM-YYYY" || val === "YYYY-MM-DD" || val === "DD/MM/YYYY";
       }).catch(() => true);
       
+      if (isEmpty && (await this.shouldSkipOptional(picker))) continue;
       if (isEmpty) {
         console.log("[QuestionnairePage] Opening single date picker dropdown...");
         await picker.click({ force: true });
@@ -1569,6 +1750,7 @@ export class QuestionnairePage {
         return v.includes("/") && !/^\d{2,3}\/\d{2,3}$/.test(v);
       }).catch(() => false);
       const needsFill = isEmpty || isIncompleteBp || !(await this.isWithinDeclaredBounds(input));
+      if (isVisible && needsFill && (await this.shouldSkipOptional(input))) continue;
       if (isVisible && needsFill) {
         const questionText = await this.getNearbyQuestionText(input);
         const placeholder = (await input.getAttribute("placeholder")) || "";
@@ -1609,12 +1791,8 @@ export class QuestionnairePage {
           qTextLower.includes("postcode")
         ) {
           await input.fill(TEST_USER.postcode);
-        } else if (isDobField && /^d+$/i.test(placeholder.trim())) {
-          await input.fill(TEST_USER.dob.day);
-        } else if (isDobField && /^m+$/i.test(placeholder.trim())) {
-          await input.fill(TEST_USER.dob.month);
-        } else if (isDobField && /^y+$/i.test(placeholder.trim())) {
-          await input.fill(TEST_USER.dob.year);
+        } else if (isDobField) {
+          await input.fill(await this.resolveDobPart(input, placeholder));
         } else if (/1\s*to\s*10|1-10/i.test(questionText) || /1\s*to\s*10|1-10/i.test(placeholder)) {
           await input.fill(await this.resolveNumericValue(input, questionText, placeholder, 5));
         } else if (placeholder.includes("___/___") || placeholder.includes("mmHg") || /blood\s*pressure/i.test(questionText) || /systolic/i.test(questionText)) {
@@ -1644,12 +1822,22 @@ export class QuestionnairePage {
       const isVisible = await input.isVisible().catch(() => false);
       const isEmpty = await input.evaluate((el: HTMLInputElement) => !el.value).catch(() => true);
       const needsFill = isEmpty || !(await this.isWithinDeclaredBounds(input));
+      if (isVisible && needsFill && (await this.shouldSkipOptional(input))) continue;
       if (isVisible && needsFill) {
         const questionText = await this.getNearbyQuestionText(input);
         const placeholder = (await input.getAttribute("placeholder")) || "";
         const name = (await input.getAttribute("name") || "").toLowerCase();
         const placeholderLower = placeholder.toLowerCase();
         const qTextLower = questionText.toLowerCase();
+
+        // Split DOB boxes rendered as number inputs (e.g. inputmode="numeric")
+        // must get the real day/month/year, not a numeric-range guess.
+        const isDobField = qTextLower.includes("date of birth") || qTextLower.includes("dob");
+        if (isDobField) {
+          await input.fill(await this.resolveDobPart(input, placeholder));
+          answeredAny = true;
+          continue;
+        }
 
         // Range hints (min/max attrs, or "between X and/to Y" phrasing like
         // "Enter Number between 12 to 20") take priority over a fixed
@@ -1673,10 +1861,24 @@ export class QuestionnairePage {
     // pick "No"/the last option — wrong for Male/Female), so without this
     // they never get answered at all when this step appears inside the
     // questionnaire dialog. Match TEST_USER.gender specifically.
-    const genderRadios = this.page.locator(
+    //
+    // ROOT CAUSE of "not selecting Gender at birth": this narrow selector
+    // (name="gender" or id=male/female) matched 0 radios on this tenant —
+    // it renders the field as "Gender at birth" with plain Male/Female
+    // labeled radios that don't carry that name/id — so `genderCount > 0`
+    // was false and the whole block, fallback included, was skipped
+    // entirely. Falls back to any visible radio pair labeled Male/Female
+    // when the specific selector finds nothing.
+    let genderRadios = this.page.locator(
       'input[type="radio"][name="gender"], input[type="radio"]#male, input[type="radio"]#female',
     );
-    const genderCount = await genderRadios.count().catch(() => 0);
+    let genderCount = await genderRadios.count().catch(() => 0);
+    if (genderCount === 0) {
+      genderRadios = this.page.locator(
+        'label:has-text("Male") input[type="radio"], label:has-text("Female") input[type="radio"]',
+      );
+      genderCount = await genderRadios.count().catch(() => 0);
+    }
     if (genderCount > 0) {
       const genderChecked = await genderRadios
         .evaluateAll((els) => els.some((el) => (el as HTMLInputElement).checked))
@@ -1688,20 +1890,71 @@ export class QuestionnairePage {
             `label:has-text("${targetLabel}") input[type="radio"], input[type="radio"][value="${targetLabel}" i], input[type="radio"]#${TEST_USER.gender}`,
           )
           .first();
+        // Some tenants render this as a pre-answered, disabled read-only
+        // field (same pattern as other "safety-net" radios elsewhere) —
+        // .check() with no explicit timeout inherits the 15s project
+        // actionTimeout, and this whole block re-runs on every pass of
+        // fillVisibleQuestionsOnce() (up to 4 passes x up to 50 steps), so
+        // a stuck disabled radio can burn minutes. Check enabled first and
+        // cap the actual click attempt at 2s so it fails fast instead.
+        const targetUsable =
+          (await targetRadio.isVisible({ timeout: 1_000 }).catch(() => false)) &&
+          (await targetRadio.isEnabled().catch(() => false));
         const clicked =
-          (await targetRadio.isVisible().catch(() => false)) &&
+          targetUsable &&
           (await targetRadio
-            .check({ force: true })
+            .check({ force: true, timeout: 2_000 })
             .then(() => true)
             .catch(() => false));
-        if (!clicked) {
+        if (!clicked && targetUsable) {
           await this.page
             .locator(`label:has-text("${targetLabel}")`)
             .first()
-            .click({ force: true })
+            .click({ force: true, timeout: 2_000 })
             .catch(() => {});
         }
-        answeredAny = true;
+        // Only report progress when an actual interaction was attempted —
+        // a disabled/unusable radio means nothing happened, and falsely
+        // claiming progress every pass masks the real "nothing left to do"
+        // state (it's very likely already showing the correct pre-answered
+        // value, just not reflected via the native .checked property).
+        if (targetUsable) answeredAny = true;
+      }
+    } else {
+      // ROOT CAUSE (2nd variant): some tenants render "Gender at birth" as
+      // plain `<button type="button">Male</button>`/`<button>Female</button>`
+      // toggles with NO `input[type="radio"]` at all — every check above
+      // finds 0 matches, so gender is never touched. Since these buttons
+      // carry no visible "selected" class in their markup (both look
+      // identical before/after in the raw HTML this was reported from), we
+      // mark our own click with a data attribute so a later pass doesn't
+      // click it again (this style of button often toggles/deselects on a
+      // second click).
+      const genderHeading = this.page
+        .locator(':text("Gender at birth"), :text("Gender")')
+        .first();
+      if (await genderHeading.count().catch(() => 0)) {
+        const genderGroup = genderHeading
+          .locator('xpath=ancestor::*[count(.//button) >= 2][1]')
+          .first();
+        if (await genderGroup.count().catch(() => 0)) {
+          const targetLabel = TEST_USER.gender === "male" ? "Male" : "Female";
+          const targetButton = genderGroup
+            .locator(`button:has-text("${targetLabel}")`)
+            .first();
+          const alreadyMarked =
+            (await targetButton.getAttribute("data-qa-selected").catch(() => null)) === "true";
+          if (
+            !alreadyMarked &&
+            (await targetButton.isVisible({ timeout: 1_000 }).catch(() => false))
+          ) {
+            await targetButton.click({ force: true, timeout: 2_000 }).catch(() => {});
+            await targetButton
+              .evaluate((el) => el.setAttribute("data-qa-selected", "true"))
+              .catch(() => {});
+            answeredAny = true;
+          }
+        }
       }
     }
 
@@ -1712,6 +1965,7 @@ export class QuestionnairePage {
       const cb = checkboxes.nth(i);
       const isVisible = await cb.isVisible().catch(() => false);
       const isChecked = await cb.isChecked().catch(() => false);
+      if (isVisible && !isChecked && (await this.shouldSkipOptional(cb))) continue;
       if (isVisible && !isChecked) {
         // Checkbox groups (`.ant-checkbox-group`, "select at least one")
         // often include a mutually-exclusive "Other"/"None of the above"
@@ -1757,6 +2011,8 @@ export class QuestionnairePage {
           continue;
         }
 
+        if (await this.shouldSkipOptional(group)) continue;
+
         const wrappers = group.locator(".ant-radio-wrapper, .ant-radio-button-wrapper");
         if ((await wrappers.count().catch(() => 0)) > 0) {
           await this.clickBestRadioOption(wrappers);
@@ -1776,6 +2032,9 @@ export class QuestionnairePage {
     for (const name of radioNames) {
       const groupLoc = this.page.locator(`input[name="${name}"]`);
       const checkedLoc = this.page.locator(`input[name="${name}"]:checked`);
+      if ((await checkedLoc.count().catch(() => 0)) === 0 && (await this.shouldSkipOptional(groupLoc.first()))) {
+        continue;
+      }
       if ((await checkedLoc.count().catch(() => 0)) === 0) {
         // Some tenants (e.g. Kepple Lane) render pre-answered safety-net
         // questions as disabled radios — nothing to click, so skip them
@@ -1806,6 +2065,7 @@ export class QuestionnairePage {
         if (hasSelection) {
           continue;
         }
+        if (await this.shouldSkipOptional(select)) continue;
         
         // Identify this select by its nearby question title (stable across
         // re-renders) so repeated failures can be tracked and capped —
