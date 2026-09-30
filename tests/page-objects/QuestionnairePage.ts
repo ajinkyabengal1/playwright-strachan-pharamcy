@@ -8,7 +8,9 @@ import {
   ERECTILE_DYSFUNCTION_RULES,
   SHINGLES_RULES,
   WEIGHT_MANAGEMENT_RULES,
+  OUTCOME_RULES,
 } from "./ConditionQuestionnaireRules";
+import { getOutcomeConfig } from "../fixtures/outcome-config";
 
 // Fallback answers for generic questionnaire fields that don't map to a
 // specific rule (free-text boxes, occupation, etc.) or to real patient data
@@ -30,6 +32,29 @@ export class QuestionnairePage {
   private readonly MAX_QUESTIONS = 50;
   private readonly answeredRuleKeys = new Set<string>();
   private readonly stuckSelectAttempts = new Map<string, number>();
+  // ROOT CAUSE FIX ("Personal Information Gathering" burned the entire
+  // 300s test timeout stuck re-opening the same range/date picker forever):
+  // unlike the ant-select loop above, the range/date-picker loops had no
+  // retry cap at all -- if a picker's cells never actually register a value
+  // (this specific site's picker component apparently needs different
+  // interaction than the "click 1st cell, then 7th" strategy that works on
+  // other tenants), fillVisibleQuestionsOnce() just reopens it every single
+  // pass, indefinitely, until the whole test times out.
+  private readonly stuckPickerAttempts = new Map<string, number>();
+
+  // ROOT CAUSE FIX ("Hepatitis A & B Travel Vaccination" left a required
+  // "To Which Country or Countries you are going?" select permanently on
+  // "Please Select" with a red validation error, while a separate but
+  // structurally-identical "From Where Did You Travel From?" select right
+  // above it got auto-filled with "Afghanistan" -- both share the same
+  // options list, always default to picking `options.first()`, and this
+  // site's own validation rejects the destination matching the origin. The
+  // click still "succeeds" and looks answered at the moment we pick it, so
+  // this was never revisited -- the error only appears after the fact,
+  // once the form tries to validate. Track which option text this generic
+  // handler has already picked for some OTHER select on this same page and
+  // avoid repeating it, picking the next available option instead).
+  private readonly usedGenericSelectValues = new Set<string>();
 
   /**
    * True once a terminal Result screen with no booking option (e.g.
@@ -40,6 +65,51 @@ export class QuestionnairePage {
    * the run for never reaching a booking confirmation.
    */
   endedWithoutBooking = false;
+
+  /**
+   * Set whenever an outcome-config-recognized terminal screen (NHS 111,
+   * etc.) is reached — captured at the moment it's actually visible, since
+   * the spec's own final-assertion page re-scan can run after the dialog
+   * has already been dismissed for tidiness. The spec prefers this over a
+   * live page re-scan when present.
+   */
+  reachedOutcome: { id: string; label: string } | null = null;
+
+  /**
+   * Every question this automation answered, in the order answered — used
+   * to compare "what we filled" against "what the submit_questionnaire API
+   * call actually sent" (see condition-flow.spec.ts's buildQaComparison()).
+   * Keyed by question text since that's all the page-object side knows;
+   * the API side only has numeric question_detail_id, matched by title text.
+   */
+  readonly filledAnswers: { question: string; answer: string }[] = [];
+
+  private recordAnswer(question: string, answer: string) {
+    const cleanQuestion = question.replace(/\s+/g, " ").trim();
+    const cleanAnswer = answer.replace(/\s+/g, " ").trim();
+    if (!cleanQuestion || !cleanAnswer) return;
+
+    // ROOT CAUSE FIX (confirmed live -- Q&A Verification table showing
+    // mismatches where the "Filled Answer" column displayed a completely
+    // unrelated value, e.g. a generic free-text default for a numeric
+    // question that was actually answered correctly): this used to push a
+    // NEW entry on every call with no deduplication. A field answered more
+    // than once across passes -- an early generic-fallback guess later
+    // overwritten by a correct rule-based/retry fill, or the same field
+    // re-scanned on a later pass -- accumulated multiple stale entries for
+    // the same question text. buildQaComparison() then had multiple
+    // candidates to fuzzy-match against a single submitted answer and could
+    // pick the wrong (older, stale) one instead of the field's actual final
+    // DOM value. Always keep only the LATEST recorded answer per question.
+    const existing = this.filledAnswers.find(
+      (entry) => entry.question === cleanQuestion,
+    );
+    if (existing) {
+      existing.answer = cleanAnswer;
+    } else {
+      this.filledAnswers.push({ question: cleanQuestion, answer: cleanAnswer });
+    }
+  }
 
   /**
    * "required-only": generic questionnaire-content loops in
@@ -198,6 +268,40 @@ export class QuestionnairePage {
    *  - Date → fill with test DOB
    * Then click Next/Continue/Submit.
    */
+  /**
+   * Investigation-only instrumentation (gated by DEBUG_QUESTIONS=1): dumps
+   * every visible question's heading + all its clickable option labels, so
+   * a real outcome-branch map can be built from live output instead of
+   * guessing. Not used by any normal run — safe to delete once the
+   * Shingles outcome rules are fully authored and confirmed.
+   */
+  private async debugDumpVisibleQuestions() {
+    const headings = this.page.locator(
+      '.hq-question__title, .questions.required-question, .questions, .question-title',
+    );
+    const count = await headings.count().catch(() => 0);
+    for (let i = 0; i < count; i++) {
+      const heading = headings.nth(i);
+      if (!(await heading.isVisible().catch(() => false))) continue;
+      const text = ((await heading.textContent().catch(() => "")) || "").trim();
+      if (!text) continue;
+
+      const wrapper = heading.locator(
+        'xpath=ancestor::*[contains(@class,"hq-question") or contains(@class,"questionnaire-answer-wrapper") or contains(@class,"question-container")][1]',
+      );
+      const options = wrapper.locator(
+        'label, .ant-radio-wrapper, .ant-radio-button-wrapper, .ant-checkbox-wrapper',
+      );
+      const optCount = await options.count().catch(() => 0);
+      const optionTexts: string[] = [];
+      for (let j = 0; j < Math.min(optCount, 20); j++) {
+        const t = ((await options.nth(j).textContent().catch(() => "")) || "").trim();
+        if (t) optionTexts.push(t);
+      }
+      console.log(`[DEBUG_QUESTIONS] "${text}" → options: ${JSON.stringify(optionTexts)}`);
+    }
+  }
+
   async answerAllQuestions() {
     // Once nothing changes for a few consecutive steps, further looping is
     // pure waste — each pass re-scans the entire page (selects, dates,
@@ -271,6 +375,10 @@ export class QuestionnairePage {
         return;
       }
 
+      if (process.env.DEBUG_QUESTIONS === "1") {
+        await this.debugDumpVisibleQuestions();
+      }
+
       let answered = await this.answerCurrentQuestion();
       const advanced = await this.progressQuestionnaire();
 
@@ -323,11 +431,16 @@ export class QuestionnairePage {
   private async clickBestRadioOption(
     wrappers: ReturnType<Page["locator"]>,
   ): Promise<boolean> {
-    const enabledWrappers = wrappers.filter({
-      hasNot: this.page.locator(
-        ".ant-radio-wrapper-disabled, .ant-radio-button-wrapper-disabled, [aria-disabled='true']",
-      ),
-    });
+    // ROOT CAUSE FIX (confirmed live -- a disabled radio hung the full 15s
+    // actionTimeout on every retry, up to MAX_QUESTIONS times): `.filter({
+    // hasNot: locator(selector) })` only excludes elements that have a
+    // DESCENDANT matching selector -- but "ant-radio-wrapper-disabled" etc.
+    // are classes on the wrapper element ITSELF, not a child, so this never
+    // actually excluded anything. `:scope:not(...)` filters the element
+    // against its own classes/attributes instead.
+    const enabledWrappers = wrappers.locator(
+      ":scope:not(.ant-radio-wrapper-disabled):not(.ant-radio-button-wrapper-disabled):not([aria-disabled='true'])",
+    );
     return this.clickPreferredOption(enabledWrappers, [
       /^I do not have these symptoms$/i,
       /do not have these symptoms/i,
@@ -466,8 +579,17 @@ export class QuestionnairePage {
         const disabled = await option
           .evaluate((el) => {
             const htmlEl = el as HTMLElement;
+            // ROOT CAUSE FIX (confirmed live -- a plain `.includes("disabled")`
+            // false-positives on Tailwind's `disabled:opacity-40
+            // disabled:cursor-not-allowed` utility classes, which are ALWAYS
+            // present in className regardless of actual state -- only their
+            // CSS effect is conditional. Match "disabled" only as a whole
+            // class token or a "-disabled" suffix (e.g. AntD's
+            // "ant-radio-wrapper-disabled"), never as a "disabled:" variant
+            // prefix.
+            const cls = htmlEl.className || "";
             return (
-              htmlEl.className.includes("disabled") ||
+              /(^|\s)([\w-]*-)?disabled(\s|$)/.test(cls) ||
               htmlEl.getAttribute("aria-disabled") === "true"
             );
           })
@@ -528,9 +650,30 @@ export class QuestionnairePage {
     for (let i = 0; i < count; i++) {
       const option = wrappers.nth(i);
       if (!(await option.isVisible().catch(() => false))) continue;
+
+      // ROOT CAUSE FIX (confirmed live -- hung the full 15s actionTimeout
+      // on a disabled "No" wrapper, same class of bug fixed in
+      // clickBestRadioOption/the standardRadios loop above): check the
+      // wrapper's OWN class/attribute before clicking, and cap the actual
+      // click attempt short so an unexpectedly-disabled option fails fast
+      // instead of burning the full default timeout.
+      const isDisabled = await option
+        .evaluate((el: HTMLElement) => {
+          // Same Tailwind `disabled:` variant false-positive fix as above --
+          // match "disabled" only as a whole token or "-disabled" suffix.
+          const cls = el.className || "";
+          return (
+            /(^|\s)([\w-]*-)?disabled(\s|$)/.test(cls) ||
+            el.getAttribute("aria-disabled") === "true" ||
+            el.querySelector("input")?.hasAttribute("disabled")
+          );
+        })
+        .catch(() => false);
+      if (isDisabled) continue;
+
       await option.scrollIntoViewIfNeeded().catch(() => {});
-      await option.click({ force: true }).catch(async () => {
-        await option.evaluate((el: HTMLElement) => el.click());
+      await option.click({ force: true, timeout: 3_000 }).catch(async () => {
+        await option.evaluate((el: HTMLElement) => el.click()).catch(() => {});
       });
       await this.page.waitForTimeout(250);
 
@@ -585,12 +728,14 @@ export class QuestionnairePage {
 
       // FIX:
       // skip disabled radios
+      // (Tailwind `disabled:` variant false-positive fix -- see above)
       const disabled = await radioOption
         .evaluate((el) => {
           const htmlEl = el as HTMLElement;
+          const cls = htmlEl.className || "";
 
           return (
-            htmlEl.className.includes("disabled") ||
+            /(^|\s)([\w-]*-)?disabled(\s|$)/.test(cls) ||
             htmlEl.getAttribute("aria-disabled") === "true"
           );
         })
@@ -1058,11 +1203,23 @@ export class QuestionnairePage {
     // IMPORTANT:
     // keep heading matching strict to prevent broad container matches that can
     // make multiple input rules target the same field.
+    //
+    // ROOT CAUSE (found via live Kepple Lane investigation): this selector
+    // never included ".hq-question__title" — the class this same file
+    // already relies on elsewhere (getNearbyQuestionText, the ant-select
+    // stuck-attempt key) for hq-kit-style tenants. Every rule-based match
+    // against a hq-kit condition (Shingles included) silently always
+    // returned zero matches and fell straight through to the generic
+    // fallback — confirmed by every prior run's "rule=false, generic=true"
+    // log line, on every condition, every time.
     return this.page
       .locator(
-        [".questions.required-question", ".questions", ".question-title"].join(
-          ", ",
-        ),
+        [
+          ".hq-question__title",
+          ".questions.required-question",
+          ".questions",
+          ".question-title",
+        ].join(", "),
       )
       .filter({ hasText: pattern })
       .first();
@@ -1135,10 +1292,22 @@ export class QuestionnairePage {
     const activeCondition = getActiveConditionName().toLowerCase();
 
     // 1. Process rule-based answers
-    const handledByConditionRule = await this.answerByConditionRules();
+    let handledByConditionRule = await this.answerByConditionRules();
 
     // 2. Process all visible questions generically (essential for forms displaying multiple questions at once)
     const handledGenericFields = await this.fillAllVisibleQuestions();
+
+    // ROOT CAUSE FIX (confirmed live -- Weight Management's questionnaire is
+    // a CHAIN of separate templates; a newly-revealed question (e.g. the
+    // "Would you like to continue with this assessment?" gate that must be
+    // "Yes" for the eating-disorder sub-questions to even render) can finish
+    // rendering only partway through this pass -- after the rule scan above
+    // already ran, but in time for fillAllVisibleQuestions()'s generic
+    // fallback to grab it first and answer it wrong. Re-run the rule engine
+    // once more so it can override any such default before this pass ends.
+    if (!handledByConditionRule) {
+      handledByConditionRule = await this.answerByConditionRules();
+    }
 
     if (handledByConditionRule || handledGenericFields) {
       console.log(
@@ -1150,7 +1319,45 @@ export class QuestionnairePage {
 
     // For weight-management we keep questionnaire strictly rule-driven to avoid
     // falling into generic shingles-style radio fallbacks on disabled options.
-    if (activeCondition === "weight management") {
+    //
+    // ROOT CAUSE FIX (confirmed live -- "Weight Management (Weight Loss
+    // Treatment)", real slug "weight-management-weight-loss-treatment-
+    // private", hung for the full test timeout stuck inside the Shingles-
+    // style "I do not have these symptoms" fallback block below): this
+    // exact-string check only ever matched the literal condition name
+    // "weight management" -- any other Weight Management variant slug (this
+    // one included) never matched it at all, so every such variant fell
+    // through into that unrelated fallback block regardless of this guard's
+    // intent. Match by substring, same convention used everywhere else in
+    // this file for identifying a Weight Management condition.
+    if (
+      activeCondition.includes("weight management") ||
+      activeCondition.includes("weight-management")
+    ) {
+      return false;
+    }
+
+    // ROOT CAUSE FIX (confirmed live -- "All Test Question" hung for the
+    // FULL 5-minute test timeout with a required "Please select Drug"
+    // remote-search select permanently empty, red "Please select option
+    // from drop down" validation showing, while this legacy fallback kept
+    // repeatedly force-clicking random unrelated "No" radios elsewhere on
+    // the page via its broad `text=/^No$/i` selector, over and over, never
+    // addressing the actual blocker): once we've already given up on some
+    // required select or date/range picker (its own retry cap reached), NO
+    // amount of clicking unrelated radios here is going to un-stick the
+    // form -- that field will stay empty and the form can never validate
+    // regardless. Skip this whole fallback in that case, for every
+    // condition, so the caller's no-progress-streak exit can kick in and
+    // fail fast (within a few seconds) instead of burning the rest of the
+    // test timeout on a lost cause.
+    const hasGivenUpOnARequiredField =
+      [...this.stuckSelectAttempts.values()].some((n) => n >= 2) ||
+      [...this.stuckPickerAttempts.values()].some((n) => n >= 2);
+    if (hasGivenUpOnARequiredField) {
+      console.log(
+        "[QuestionnairePage] Already gave up on a required field elsewhere on this page -- skipping the generic radio fallback instead of retrying a lost cause.",
+      );
       return false;
     }
 
@@ -1187,6 +1394,31 @@ export class QuestionnairePage {
         `[QuestionnairePage] Shingles block handled=${handled}, returning early`,
       );
       return handled;
+    }
+
+    // ROOT CAUSE FIX (confirmed live -- "All Test Question", a completely
+    // generic condition with no Shingles-style wording anywhere on it,
+    // burned the ENTIRE test timeout stuck in this block): everything below
+    // this point was written specifically for Shingles' "Do you have these
+    // symptoms?" question and assumes that exact wording exists on the
+    // page, but it ran unconditionally whenever neither the rule engine nor
+    // generic fill handled a question -- on ANY condition. With no such
+    // question actually present, `selectRadioByText` fails, and the code
+    // falls through to a broad `text=/^No$/i` scan that matches many
+    // unrelated "No" radios elsewhere on a generic questionnaire. It force-
+    // clicks each one (with no "already answered" check) then verifies
+    // against the WRONG label ("I do not have these symptoms", not "No"),
+    // so the check always fails and it just re-clicks the same unrelated
+    // radios again on every single step, 50 times, without ever making
+    // real progress. Only enter this Shingles-specific block when the page
+    // actually looks like Shingles' own questionnaire.
+    const looksLikeShingles = await this.page
+      .locator(':text("these symptoms")')
+      .first()
+      .isVisible()
+      .catch(() => false);
+    if (!looksLikeShingles) {
+      return false;
     }
 
     const noSymptomsSelected = await this.selectRadioByText(
@@ -1548,9 +1780,23 @@ export class QuestionnairePage {
     // is satisfied on the first pass and nothing retries.
     const dobHeading = this.page.locator(':text("Date of birth")').first();
     if (await dobHeading.count().catch(() => 0)) {
+      // ROOT CAUSE FIX (confirmed live -- this corrupted an unrelated "Full
+      // Name" field with the DOB day value "15" on a tenant whose DOB is a
+      // SINGLE AntD calendar picker, not 3 separate day/month/year boxes):
+      // that single-picker's own `.hq-question` wrapper contains only 1
+      // input, so the old `>= 2` walk-up kept climbing ancestors until it
+      // hit the whole question-stack container -- which also holds Full
+      // Name, the age spinner, etc. -- and then blindly filled its first 3
+      // inputs as if they were day/month/year boxes.
+      //
+      // Real split-DOB groups (the tenant this was originally written for)
+      // are a small, TIGHT wrapper around exactly the 3 plain text boxes and
+      // nothing else -- so require the ancestor to contain 2-4 inputs (never
+      // an unbounded "whole page" match) AND contain no `.ant-picker`
+      // widget (a single calendar picker is never a split-box group).
       const dobGroup = dobHeading
         .locator(
-          'xpath=ancestor::*[count(.//input[not(@type="hidden") and not(@type="checkbox") and not(@type="radio")]) >= 2][1]',
+          'xpath=ancestor::*[count(.//input[not(@type="hidden") and not(@type="checkbox") and not(@type="radio")]) >= 2 and count(.//input[not(@type="hidden") and not(@type="checkbox") and not(@type="radio")]) <= 4 and not(.//*[contains(@class,"ant-picker")])][1]',
         )
         .first();
       if (await dobGroup.count().catch(() => 0)) {
@@ -1589,9 +1835,38 @@ export class QuestionnairePage {
         if ((isStartEmpty || isEndEmpty) && (await this.shouldSkipOptional(picker))) {
           continue;
         }
+
+        // ROOT CAUSE FIX (confirmed live -- this let the SAME stuck field
+        // retry the expensive click/dropdown-wait block many times instead
+        // of actually stopping after 2 attempts, burning the whole test
+        // timeout): keying by `getNearbyQuestionText(picker)` is unstable
+        // across calls -- its result can shift slightly as sibling fields
+        // fill in around it, so the retry counter for the "same" field kept
+        // resetting to a fresh key and never reached the >=2 cutoff.
+        // Position (`i`) is stable across calls within one render pass;
+        // question text is still used for the human-readable log message.
+        const rangePickerKey = `range-picker-${i}`;
+        const rangePickerLabel =
+          (await this.getNearbyQuestionText(picker)) || rangePickerKey;
+        if ((isStartEmpty || isEndEmpty) && (this.stuckPickerAttempts.get(rangePickerKey) ?? 0) >= 2) {
+          continue;
+        }
+
         if (isStartEmpty || isEndEmpty) {
+          // Same stale-dropdown race fix as the single date picker below.
+          await this.page.keyboard.press("Escape").catch(() => {});
           console.log("[QuestionnairePage] Opening range picker dropdown by clicking start input...");
-          await inputs.nth(0).click({ force: true });
+          // ROOT CAUSE FIX (confirmed live -- this hung for the ENTIRE
+          // remaining test timeout, not just this picker's own retry cap):
+          // a bare `.click()` with no explicit timeout falls back to
+          // Playwright's default actionTimeout, which without an override
+          // effectively becomes "wait up to the whole test's remaining
+          // budget" -- if the target becomes stale/covered/never-settles, a
+          // SINGLE click can silently eat the rest of the 2-5 minute test.
+          // Bound it and swallow failure so the retry-cap logic below (which
+          // already handles "still empty after N attempts") gets a chance
+          // to run instead of the whole test hanging on one click.
+          await inputs.nth(0).click({ force: true, timeout: 5_000 }).catch(() => {});
           
           const dropdown = this.page.locator(".ant-picker-dropdown:visible").first();
           await dropdown.waitFor({ state: "visible", timeout: 3000 }).catch(() => {});
@@ -1671,6 +1946,23 @@ export class QuestionnairePage {
             }
           }
         }
+
+        const [startNow, endNow] = await Promise.all([
+          inputs.nth(0).inputValue().catch(() => ""),
+          inputs.nth(1).inputValue().catch(() => ""),
+        ]);
+        const stillIncomplete =
+          (!startNow || startNow === "DD-MM-YYYY" || startNow === "YYYY-MM-DD" || startNow === "DD/MM/YYYY") ||
+          (!endNow || endNow === "DD-MM-YYYY" || endNow === "YYYY-MM-DD" || endNow === "DD/MM/YYYY");
+        if (stillIncomplete) {
+          const attempts = (this.stuckPickerAttempts.get(rangePickerKey) ?? 0) + 1;
+          this.stuckPickerAttempts.set(rangePickerKey, attempts);
+          if (attempts >= 2) {
+            console.log(`[QuestionnairePage] Range picker "${rangePickerLabel}" still empty after ${attempts} attempts -- giving up to avoid retrying forever`);
+          }
+        } else {
+          this.recordAnswer(rangePickerLabel, `${startNow} - ${endNow}`);
+        }
       }
     }
 
@@ -1693,13 +1985,33 @@ export class QuestionnairePage {
       }).catch(() => true);
       
       if (isEmpty && (await this.shouldSkipOptional(picker))) continue;
+
+      // Same key-instability fix as rangePickerKey above -- keep this
+      // purely positional so the retry cap actually accumulates instead of
+      // resetting every call.
+      const datePickerKey = `date-picker-${i}`;
+      const datePickerLabel =
+        (await this.getNearbyQuestionText(picker)) || datePickerKey;
+      if (isEmpty && (this.stuckPickerAttempts.get(datePickerKey) ?? 0) >= 2) continue;
+
       if (isEmpty) {
+        // ROOT CAUSE FIX (confirmed live -- two structurally-identical
+        // single-date questions back to back on the same page; one filled
+        // fine, the very next one didn't): opening a SECOND `.ant-picker`
+        // dropdown right after a prior one closed can race against that
+        // prior dropdown's own closing animation/DOM removal, so
+        // `.ant-picker-dropdown:visible.first()` can grab a stale, already-
+        // closing panel instead of the freshly-opened one for THIS picker --
+        // its cell click then lands on nothing. Press Escape first to force
+        // any lingering dropdown fully closed before opening a new one.
+        await this.page.keyboard.press("Escape").catch(() => {});
         console.log("[QuestionnairePage] Opening single date picker dropdown...");
-        await picker.click({ force: true });
-        
+        // Same unbounded-click hang fix as the range picker above.
+        await picker.click({ force: true, timeout: 5_000 }).catch(() => {});
+
         const dropdown = this.page.locator(".ant-picker-dropdown:visible").first();
         await dropdown.waitFor({ state: "visible", timeout: 3000 }).catch(() => {});
-        
+
         const cell = dropdown.locator(".ant-picker-cell-in-view:not(.ant-picker-cell-disabled)").first();
         const cellInner = cell.locator(".ant-picker-cell-inner");
         if (await cellInner.isVisible({ timeout: 1000 }).catch(() => false)) {
@@ -1711,10 +2023,27 @@ export class QuestionnairePage {
           await cell.click({ force: true }).catch(() => {});
           answeredAny = true;
         } else {
-          // Fallback: Type in value
           console.log("[QuestionnairePage] Cell not visible, falling back to manual typing...");
+        }
+
+        // ROOT CAUSE FIX (confirmed live -- a required date field left
+        // empty after a failed cell click permanently blocks the form's own
+        // validation, which meant the outer loop could NEVER converge and
+        // burned the full test timeout retrying elsewhere): don't wait for
+        // a second outer-loop pass to try the manual-typing fallback --
+        // verify the click actually took effect and fall back to typing
+        // immediately, within this same attempt, whenever it didn't.
+        const valueAfterCellClick = await picker.inputValue().catch(() => "");
+        const stillEmptyAfterCellClick =
+          !valueAfterCellClick ||
+          valueAfterCellClick === "DD-MM-YYYY" ||
+          valueAfterCellClick === "YYYY-MM-DD" ||
+          valueAfterCellClick === "DD/MM/YYYY";
+        if (stillEmptyAfterCellClick) {
+          console.log("[QuestionnairePage] Cell click didn't set a value -- falling back to manual typing...");
+          await this.page.keyboard.press("Escape").catch(() => {});
           await picker.evaluate((el: HTMLInputElement) => el.removeAttribute("readonly"));
-          await picker.click();
+          await picker.click({ timeout: 5_000 }).catch(() => {});
           await picker.fill("");
           const placeholder = (await picker.getAttribute("placeholder")) || "";
           const dateStr = placeholder.includes("YYYY") ? "1990-01-01" : "01-01-1990";
@@ -1722,6 +2051,17 @@ export class QuestionnairePage {
           await picker.press("Enter").catch(() => {});
           await this.page.keyboard.press("Enter").catch(() => {});
           answeredAny = true;
+        }
+        const dateNow = await picker.inputValue().catch(() => "");
+        const dateStillEmpty = !dateNow || dateNow === "DD-MM-YYYY" || dateNow === "YYYY-MM-DD" || dateNow === "DD/MM/YYYY";
+        if (dateStillEmpty) {
+          const attempts = (this.stuckPickerAttempts.get(datePickerKey) ?? 0) + 1;
+          this.stuckPickerAttempts.set(datePickerKey, attempts);
+          if (attempts >= 2) {
+            console.log(`[QuestionnairePage] Date picker "${datePickerLabel}" still empty after ${attempts} attempts -- giving up to avoid retrying forever`);
+          }
+        } else {
+          this.recordAnswer(datePickerLabel, dateNow);
         }
       }
     }
@@ -1738,6 +2078,19 @@ export class QuestionnairePage {
     const textCount = await textInputs.count().catch(() => 0);
     for (let i = 0; i < textCount; i++) {
       const input = textInputs.nth(i);
+      // ROOT CAUSE FIX (confirmed live -- a date-range's own "End date"
+      // input got overwritten with the generic free-text default,
+      // "No significant medical history..."): AntD's date/range picker
+      // `<input>` elements carry no `type` attribute, so they were matched
+      // by this loop's `input:not([type])` branch whenever the dedicated
+      // date-picker handling above gave up on them (still empty after its
+      // retry cap) -- this loop then ran right after and "helpfully" filled
+      // them with free text instead. Date/range inputs are handled
+      // exclusively by section 1 above; skip them here entirely.
+      const isPickerInput = await input
+        .evaluate((el) => !!el.closest(".ant-picker"))
+        .catch(() => false);
+      if (isPickerInput) continue;
       const isVisible = await input.isVisible().catch(() => false);
       const isEmpty = await input.evaluate((el: HTMLInputElement | HTMLTextAreaElement) => !el.value).catch(() => true);
       // A field can already hold a value yet still violate its own min/max
@@ -1808,6 +2161,10 @@ export class QuestionnairePage {
         } else {
           await input.fill(QUESTIONNAIRE_DEFAULTS.freeTextAnswer);
         }
+        // Read back the actual value rather than re-deriving which branch
+        // fired — correct regardless of which of the many cases above ran.
+        const filledValue = await input.inputValue().catch(() => "");
+        this.recordAnswer(questionText, filledValue);
         answeredAny = true;
       }
     }
@@ -1842,6 +2199,13 @@ export class QuestionnairePage {
         // Range hints (min/max attrs, or "between X and/to Y" phrasing like
         // "Enter Number between 12 to 20") take priority over a fixed
         // fallback guess, which can fall outside the field's own bounds.
+        //
+        // ROOT CAUSE FIX (confirmed live -- "What's your current age?" was
+        // getting filled with 150): there was no dedicated "age" case here,
+        // so it silently fell through to the generic default of 150 --
+        // which happens to be this same fallback's WEIGHT value. Match
+        // "age" (word-boundary, so it doesn't false-positive on "average"/
+        // "percentage") before the generic default applies.
         let fallback = 150;
         if (/1\s*to\s*10|1-10/i.test(questionText) || /1\s*to\s*10|1-10/i.test(placeholder)) {
           fallback = 5;
@@ -1849,9 +2213,12 @@ export class QuestionnairePage {
           fallback = 170;
         } else if (name.includes("weight") || placeholderLower.includes("weight") || qTextLower.includes("weight")) {
           fallback = 150;
+        } else if (/\bage\b/.test(name) || /\bage\b/.test(placeholderLower) || /\bage\b/.test(qTextLower)) {
+          fallback = 40;
         }
         const value = await this.resolveNumericValue(input, questionText, placeholder, fallback);
         await input.fill(value);
+        this.recordAnswer(questionText, value);
         answeredAny = true;
       }
     }
@@ -1989,6 +2356,7 @@ export class QuestionnairePage {
         // Scope to THIS checkbox's own ancestor label (not a separately
         // indexed label list, which can misalign and click the wrong box).
         const parent = cb.locator("xpath=ancestor::label[1]").first();
+        const optionLabel = (await parent.textContent().catch(() => "")) || "";
         if (await parent.count().catch(() => 0) > 0 && await parent.isVisible().catch(() => false)) {
           await parent.click({ force: true }).catch(async () => {
             await cb.check({ force: true }).catch(() => {});
@@ -1996,6 +2364,26 @@ export class QuestionnairePage {
         } else {
           await cb.check({ force: true }).catch(() => {});
         }
+        // ROOT CAUSE FIX (confirmed live -- a standalone consent checkbox,
+        // "I agree that the information provided is accurate.", showed
+        // "(no match)" in the Q&A Verification table even though it WAS
+        // actually checked): this checkbox has no separate `.hq-question`
+        // heading at all -- its OWN label text is the entire question, e.g.
+        // `<div class="hq-question"><label class="ant-checkbox-wrapper">
+        // ...<span class="ant-checkbox-label">I agree...</span></label>
+        // </div>`. getNearbyQuestionText() only looks for a distinct
+        // heading element and correctly returns "" here, but recordAnswer()
+        // silently drops any call with an empty question string -- so this
+        // checkbox was checked in the DOM yet never entered filledAnswers
+        // at all. Fall back to the checkbox's own label text as the
+        // question when no separate heading exists.
+        const nearbyHeading = await this.getNearbyQuestionText(cb);
+        const cbQuestionText = nearbyHeading || optionLabel;
+        // When the checkbox's own label IS the question (no separate
+        // heading), record "Yes" as the answer rather than repeating the
+        // label text as both question and answer -- matches the site's own
+        // submitted value style (e.g. "Yes agree with this") better.
+        this.recordAnswer(cbQuestionText, nearbyHeading ? optionLabel : "Yes");
         answeredAny = true;
       }
     }
@@ -2016,6 +2404,10 @@ export class QuestionnairePage {
         const wrappers = group.locator(".ant-radio-wrapper, .ant-radio-button-wrapper");
         if ((await wrappers.count().catch(() => 0)) > 0) {
           await this.clickBestRadioOption(wrappers);
+          const groupQuestionText = await this.getNearbyQuestionText(group);
+          const checkedNow = group.locator(".ant-radio-wrapper-checked, .ant-radio-button-wrapper-checked").first();
+          const checkedText = (await checkedNow.textContent().catch(() => "")) || "";
+          this.recordAnswer(groupQuestionText, checkedText);
           answeredAny = true;
         }
       }
@@ -2039,18 +2431,55 @@ export class QuestionnairePage {
         // Some tenants (e.g. Kepple Lane) render pre-answered safety-net
         // questions as disabled radios — nothing to click, so skip them
         // instead of force-clicking into a hung 15s timeout.
-        const noOpt = groupLoc
-          .filter({ hasText: /No|None/i })
-          .filter({ hasNot: this.page.locator("[disabled], [aria-disabled='true']") });
-        const target = (await noOpt.count().catch(() => 0)) > 0
-          ? noOpt.first()
-          : groupLoc.last();
+        //
+        // ROOT CAUSE FIX (confirmed live -- this silently NEVER found a
+        // "No"/"None" option, on ANY condition, ever): `.filter({hasText})`
+        // reads an element's own textContent, but a bare `<input>` has none
+        // -- the visible label text lives in a sibling/wrapping <label>, not
+        // inside the input itself. So `noOpt` was always empty and this
+        // always fell through to `groupLoc.last()`, which for this Weight
+        // Management blood-pressure question is a disabled radio. Look up
+        // each enabled radio's own associated label text instead.
+        const enabledRadios = groupLoc.locator(
+          ":scope:not([disabled]):not([aria-disabled='true'])",
+        );
+        const enabledCount = await enabledRadios.count().catch(() => 0);
+        let target = enabledCount > 0 ? enabledRadios.last() : null;
+        for (let i = 0; i < enabledCount; i++) {
+          const candidate = enabledRadios.nth(i);
+          const labelText = await candidate
+            .evaluate((el: HTMLInputElement) => {
+              const label = el.closest("label");
+              if (label) return label.textContent || "";
+              if (el.id) {
+                const forLabel = document.querySelector(
+                  `label[for="${el.id}"]`,
+                );
+                if (forLabel) return forLabel.textContent || "";
+              }
+              return el.parentElement?.textContent || "";
+            })
+            .catch(() => "");
+          if (/no|none/i.test(labelText)) {
+            target = candidate;
+            break;
+          }
+        }
         const clickable =
+          target !== null &&
           (await target.isVisible().catch(() => false)) &&
           (await target.isEnabled().catch(() => false));
-        if (clickable) {
+        if (clickable && target) {
+          const targetLabelText = (await target.textContent().catch(() => "")) || "";
           await target.click({ force: true }).catch(() => {});
+          const srQuestionText = await this.getNearbyQuestionText(groupLoc.first());
+          if (process.env.DEBUG_QUESTIONS === "1") {
+            console.log(`[DEBUG_QUESTIONS] standardRadios name="${name}" label="${targetLabelText}" questionText="${srQuestionText}"`);
+          }
+          this.recordAnswer(srQuestionText, targetLabelText);
           answeredAny = true;
+        } else if (process.env.DEBUG_QUESTIONS === "1") {
+          console.log(`[DEBUG_QUESTIONS] standardRadios name="${name}" NOT clickable (visible/enabled check failed)`);
         }
       }
     }
@@ -2061,12 +2490,37 @@ export class QuestionnairePage {
     for (let i = 0; i < selectCount; i++) {
       const select = antSelects.nth(i);
       if (await select.isVisible().catch(() => false)) {
-        const hasSelection = await select.locator(".ant-select-selection-item").isVisible().catch(() => false);
-        if (hasSelection) {
-          continue;
-        }
-        if (await this.shouldSkipOptional(select)) continue;
-        
+        // ROOT CAUSE FIX (confirmed live -- a "select all that apply"
+        // multi-select ant-select kept getting re-opened and re-picked on
+        // EVERY pass, each time adding one more option, until it exhausted
+        // every available option: `.ant-select-selection-item` alone
+        // detects a SINGLE-select's chosen value, but a multi-select mode
+        // wraps its selected tags inside `.ant-select-selection-overflow`,
+        // so this check never saw an existing selection as "answered" even
+        // after successfully picking one. Checking both selectors together
+        // matches the fix already applied to the rule engine's own
+        // ant-select detection above.
+        // ROOT CAUSE FIX (confirmed live -- "Hepatitis A & B Travel
+        // Vaccination"'s required "To Which Country or Countries you are
+        // going?" select was permanently skipped, left on "Please Select"
+        // with a red validation error, while every other select on the page
+        // got filled: this tenant's AntD select renders an EMPTY
+        // `.ant-select-selection-item` (whitespace-only text content, e.g.
+        // " ") in the DOM even when nothing has been picked yet -- so
+        // `.isVisible()` alone was a false positive that made every unset
+        // select on this page look "already answered" from the very first
+        // scan, before we ever clicked it. Require actual non-whitespace
+        // text, not just DOM visibility.
+        const selectionItemLocator = select
+          .locator(".ant-select-selection-item, .ant-select-selection-overflow-item")
+          .first();
+        const selectionItemVisible = await selectionItemLocator
+          .isVisible()
+          .catch(() => false);
+        const selectionItemText = selectionItemVisible
+          ? ((await selectionItemLocator.textContent().catch(() => "")) || "").trim()
+          : "";
+        const hasSelection = selectionItemText.length > 0;
         // Identify this select by its nearby question title (stable across
         // re-renders) so repeated failures can be tracked and capped —
         // some selects (e.g. remote-search Pharmacy/GP Surgery lookups on
@@ -2079,6 +2533,19 @@ export class QuestionnairePage {
           .first()
           .innerText()
           .catch(() => `select-${i}`);
+        if (process.env.DEBUG_QUESTIONS === "1") {
+          console.log(`[DIAG] antSelect i=${i} key="${selectKey}" hasSelection=${hasSelection} priorAttempts=${this.stuckSelectAttempts.get(selectKey) ?? 0}`);
+        }
+        if (hasSelection) {
+          continue;
+        }
+        if (await this.shouldSkipOptional(select)) {
+          if (process.env.DEBUG_QUESTIONS === "1") {
+            console.log(`[DIAG] antSelect i=${i} key="${selectKey}" -- shouldSkipOptional=true, skipping`);
+          }
+          continue;
+        }
+
         const priorAttempts = this.stuckSelectAttempts.get(selectKey) ?? 0;
         if (priorAttempts >= 2) {
           continue;
@@ -2099,22 +2566,63 @@ export class QuestionnairePage {
             .locator('input[role="combobox"], input.ant-select-selection-search-input')
             .first();
           if (await searchInput.isVisible().catch(() => false)) {
-            await searchInput.fill("a").catch(() => {});
-            // Remote lookups (e.g. Pharmacy/GP Surgery search) can take a
-            // few seconds to respond — poll instead of guessing a fixed
-            // delay, resolving as soon as an option actually mounts.
-            options = this.page.locator(".ant-select-item-option:visible, .ant-select-item:visible");
-            await options
-              .first()
-              .waitFor({ state: "visible", timeout: 6_000 })
-              .catch(() => {});
-            optionsCount = await options.count().catch(() => 0);
+            // ROOT CAUSE FIX (confirmed live -- "Please select Drug"'s
+            // remote drug_search endpoint returned zero results for a bare
+            // single letter "a", permanently blocking this required field
+            // and hanging the whole test): a single character is often
+            // below a search API's minimum query length, or too generic to
+            // return anything useful. Try a few realistic drug-name
+            // substrings in turn, stopping as soon as one returns results --
+            // but ONLY for an actual drug-search field. This regressed
+            // EVERY OTHER remote-search select (Pharmacy/GP Surgery lookups,
+            // which already worked fine with a single quick search) into
+            // the same up-to-4-terms-times-4s wait chain, and with 2-3 such
+            // selects per page x this tenant's own 2-attempt cap, that alone
+            // was enough to burn the whole test timeout. Scope the extra
+            // terms to selects whose own label actually mentions
+            // drug/medication; everything else keeps the original
+            // single-term fast path.
+            const isDrugSearch = /drug|medication|medicine/i.test(selectKey);
+            const searchTerms = isDrugSearch ? ["para", "am", "ibu", "a"] : ["a"];
+            for (const term of searchTerms) {
+              await searchInput.fill("").catch(() => {});
+              await searchInput.fill(term).catch(() => {});
+              // Remote lookups (e.g. Pharmacy/GP Surgery/drug search) can
+              // take a few seconds to respond — poll instead of guessing a
+              // fixed delay, resolving as soon as an option actually mounts.
+              options = this.page.locator(".ant-select-item-option:visible, .ant-select-item:visible");
+              await options
+                .first()
+                .waitFor({ state: "visible", timeout: 4_000 })
+                .catch(() => {});
+              optionsCount = await options.count().catch(() => 0);
+              if (optionsCount > 0) break;
+            }
           }
         }
 
         if (optionsCount > 0) {
-          await options.first().click({ force: true });
+          // Prefer an option whose text hasn't already been picked for some
+          // OTHER select on this page (see usedGenericSelectValues comment
+          // above) -- fall back to the first option if every candidate is
+          // already used (better than answering nothing at all).
+          let chosen = options.first();
+          let optionText = (await chosen.textContent().catch(() => "")) || "";
+          if (this.usedGenericSelectValues.has(optionText.trim())) {
+            for (let oi = 1; oi < optionsCount; oi++) {
+              const candidate = options.nth(oi);
+              const candidateText = (await candidate.textContent().catch(() => "")) || "";
+              if (!this.usedGenericSelectValues.has(candidateText.trim())) {
+                chosen = candidate;
+                optionText = candidateText;
+                break;
+              }
+            }
+          }
+          await chosen.click({ force: true });
           console.log(`[QuestionnairePage] Selected option for ant-select dropdown`);
+          this.usedGenericSelectValues.add(optionText.trim());
+          this.recordAnswer(selectKey, optionText);
           answeredAny = true;
         } else {
           console.log(
@@ -2134,9 +2642,13 @@ export class QuestionnairePage {
       if (await sel.isVisible().catch(() => false)) {
         const value = await sel.inputValue().catch(() => "");
         if (value === "" || value === "Please Select") {
-          const firstVal = await sel.locator("option").nth(1).getAttribute("value").catch(() => null);
+          const firstOption = sel.locator("option").nth(1);
+          const firstVal = await firstOption.getAttribute("value").catch(() => null);
           if (firstVal) {
+            const firstOptionText = (await firstOption.textContent().catch(() => "")) || firstVal;
             await sel.selectOption(firstVal);
+            const nsQuestionText = await this.getNearbyQuestionText(sel);
+            this.recordAnswer(nsQuestionText, firstOptionText);
             answeredAny = true;
           }
         }
@@ -2158,6 +2670,8 @@ export class QuestionnairePage {
         });
         answeredAny = true;
         console.log("[QuestionnairePage] Uploaded dummy file to file input");
+        const fileQuestionText = await this.getNearbyQuestionText(input);
+        this.recordAnswer(fileQuestionText || "File upload", "medical_report.txt");
       }
     }
 
@@ -2218,14 +2732,34 @@ export class QuestionnairePage {
   private async answerByConditionRules(): Promise<boolean> {
     const activeCondition = getActiveConditionName().toLowerCase();
 
-    const rules =
-      activeCondition === "weight management"
+    // ROOT CAUSE (found while building outcome-specific testing): this used
+    // to be a strict `===` match against old display-style names
+    // ("shingles", "weight management", "erectile-dysfunction"). Real runs
+    // (dashboard, CI) pass the actual Sanity slug via CONDITION_SLUG (e.g.
+    // "shingles-herpes-zoster-nhs"), which never equals "shingles" — so
+    // these rule-sets have never actually applied in any real run; every
+    // condition, this one included, was always falling straight through to
+    // the generic fallback. Fixed to match by substring against the real
+    // slug, same convention as outcome-config.ts's getOutcomeConfig().
+    const outcomeConfig = getOutcomeConfig(activeCondition);
+    const outcomeId = process.env.OUTCOME_ID || "gateway";
+
+    let rules =
+      (outcomeConfig && OUTCOME_RULES[outcomeConfig.slug]?.[outcomeId]) || [];
+
+    // Legacy fallback for conditions not yet migrated into OUTCOME_RULES —
+    // matched the same substring way (was previously exact-match-only and
+    // therefore dead code; kept for Weight Management / Erectile Dysfunction
+    // until they get their own outcome-config entries).
+    if (rules.length === 0 && !outcomeConfig) {
+      rules = activeCondition.includes("weight management") || activeCondition.includes("weight-management")
         ? WEIGHT_MANAGEMENT_RULES
-        : activeCondition === "shingles"
+        : activeCondition.includes("shingles")
           ? SHINGLES_RULES
-          : activeCondition === "erectile-dysfunction"
+          : activeCondition.includes("erectile-dysfunction") || activeCondition.includes("erectile dysfunction")
             ? ERECTILE_DYSFUNCTION_RULES
             : [];
+    }
 
     if (rules.length === 0) {
       return false;
@@ -2316,11 +2850,49 @@ export class QuestionnairePage {
         answered = await this.isRadioSelectionApplied(rule.answerText, scope);
       }
 
+      // ROOT CAUSE FIX (confirmed live -- this exact rule kept re-matching
+      // and re-firing on EVERY pass forever, racing against the unrelated
+      // generic ant-select handler that was independently picking a
+      // DIFFERENT option each time it ran -- the field's actual submitted
+      // value could end up different from whatever we last recorded,
+      // producing spurious "filled vs submitted" mismatches): a "checkbox"
+      // rule whose question renders as an AntD `ant-select` multi-select
+      // dropdown instead of real `<input type="checkbox">` elements can
+      // never be satisfied by selectCheckboxByTextFlexible() above, which
+      // only looks for checkbox wrappers -- so `answered` stayed false
+      // forever and this rule was never added to answeredRuleKeys. If the
+      // generic fallback (which runs right after this in the same pass) has
+      // already populated SOME selection for this question, accept that and
+      // stop retrying instead of fighting it every subsequent pass.
+      // Record whatever text is ACTUALLY selected when we fall back to
+      // accepting the generic handler's own choice below, rather than the
+      // rule's intended answerText -- they can legitimately differ, and
+      // recording the wrong one would just relocate the same mismatch bug.
+      let actualAnswerText = rule.answerText;
+      if (!answered && rule.control === "checkbox") {
+        await this.page.waitForTimeout(300);
+        // Same false-positive fix as the generic ant-select handler above --
+        // this tenant's AntD select renders an empty, whitespace-only
+        // `.ant-select-selection-item` even when nothing is picked, so a
+        // bare element count isn't enough; require actual non-whitespace
+        // text before treating the question as answered.
+        const selectedItems = scope.locator(
+          ".ant-select-selection-item, .ant-select-selection-overflow-item",
+        );
+        const texts = await selectedItems.allTextContents().catch(() => []);
+        const joined = texts.map((t) => t.trim()).filter(Boolean).join(", ");
+        if (joined) {
+          actualAnswerText = joined;
+          answered = true;
+        }
+      }
+
       if (answered) {
         console.log(
           `[QuestionnairePage] Rule ${index + 1} completed successfully`,
         );
 
+        this.recordAnswer(headingText, actualAnswerText);
         this.answeredRuleKeys.add(ruleKey);
 
         handledAnyRule = true;
@@ -2358,6 +2930,48 @@ export class QuestionnairePage {
       for (let i = 0; i < count; i++) {
         const btn = matches.nth(i);
         if (await btn.isVisible().catch(() => false)) {
+          // ROOT CAUSE FIX (confirmed live -- Weight Management's Health
+          // Assessment section, an extreme default-value BMI of 51.9
+          // "Severely obese" apparently keeps this button client-side
+          // disabled/inert pending some validation): `force: true` bypasses
+          // Playwright's actionability checks INCLUDING the disabled-state
+          // check, so this used to silently "succeed" clicking a genuinely
+          // disabled button -- nothing happens, but progressQuestionnaire()
+          // still reports progressed=true, which resets
+          // answerAllQuestions()'s no-progress-streak counter every single
+          // step and burns the entire test timeout instead of failing fast.
+          // Skip a disabled candidate and keep scanning/trying other
+          // selectors instead of force-clicking through it.
+          // ROOT CAUSE FIX (confirmed live -- this regressed Shingles'
+          // Immediate Action/GP Referral runs into an infinite loop):
+          // `className.includes("disabled")` false-positives on this site's
+          // Tailwind-styled buttons, which carry `disabled:opacity-40
+          // disabled:cursor-not-allowed` utility classes in their className
+          // string ALWAYS, regardless of actual state -- only their CSS
+          // effect is conditional on the real `disabled` DOM property. That
+          // made clickPrimaryButton() treat every such button as disabled
+          // and refuse to click any of them. Match "disabled" only as a
+          // whole class token or a "-disabled" suffix (e.g. AntD's
+          // "ant-btn-disabled"), never as a "disabled:" variant prefix.
+          const disabled = await btn
+            .evaluate((el: HTMLElement) => {
+              const cls = el.className || "";
+              return (
+                (el as HTMLButtonElement).disabled === true ||
+                el.getAttribute("aria-disabled") === "true" ||
+                /(^|\s)([\w-]*-)?disabled(\s|$)/.test(cls)
+              );
+            })
+            .catch(() => false);
+          if (disabled) {
+            if (process.env.DEBUG_QUESTIONS === "1") {
+              const text = (await btn.textContent().catch(() => "")) || "";
+              console.log(
+                `[DEBUG_QUESTIONS] clickPrimaryButton: found disabled button "${text.trim()}" (sel="${sel}") — skipping instead of force-clicking`,
+              );
+            }
+            continue;
+          }
           await btn.click({ force: true });
           return true;
         }
@@ -2383,6 +2997,18 @@ export class QuestionnairePage {
       // clicking the dialog's Confirm/Continue button. Give the open
       // dialog priority over those background-page signals.
       const questionnaireDialogOpen = await this.isQuestionnaireDialogOpen();
+
+      // ROOT CAUSE FIX (confirmed live -- Weight Management's GP Referral
+      // outcome renders as a plain "Patient doesn't qualified" result banner
+      // inside the SAME questionnaire dialog, with neither a "Book Private
+      // Consultation" nor an "End assessment" button -- just whatever
+      // generic Continue/Close CTA the dialog always has, which
+      // clickPrimaryButton() below clicks straight through without either
+      // handler below ever getting a chance to record it). Record any
+      // outcome-config match unconditionally, every attempt, BEFORE that
+      // click navigates away -- this never consumes the click itself, so
+      // clickPrimaryButton() still runs exactly as before either handler.
+      await this.captureOutcomeScreenIfVisible();
 
       // NHS 111 / "Book private consultation" can render either as its own
       // popup or as the Result step inside the questionnaire dialog itself
@@ -2424,16 +3050,35 @@ export class QuestionnairePage {
         // single fillAllVisibleQuestions() pass that ran before this loop
         // started — otherwise later questions never get answered and we
         // just click a no-op button five times.
+        //
+        // ROOT CAUSE FIX (confirmed live -- Weight Management's eating
+        // disorder gate question, "Would you like to continue with this
+        // assessment?", was ALWAYS being answered "No" by the generic
+        // fallback here even with a matching OUTCOME_RULES entry, because
+        // this dialog-open branch runs inside progressQuestionnaire()'s own
+        // retry loop, one question-reveal-then-click cycle at a time --
+        // fully separate from and faster than the outer answerAllQuestions()
+        // step loop's own rule scan. By the time control returned to that
+        // outer loop, this newly-revealed question had already been
+        // generically answered AND submitted. Rule-based answers must win
+        // this race, so try them first on every attempt here too.
+        if (process.env.DEBUG_QUESTIONS === "1") console.log(`[DIAG] attempt ${attempt}: before answerByConditionRules`);
+        await this.answerByConditionRules().catch(() => false);
+        if (process.env.DEBUG_QUESTIONS === "1") console.log(`[DIAG] attempt ${attempt}: before fillAllVisibleQuestions`);
         await this.fillAllVisibleQuestions().catch(() => false);
+        if (process.env.DEBUG_QUESTIONS === "1") console.log(`[DIAG] attempt ${attempt}: after fillAllVisibleQuestions`);
       }
 
+      if (process.env.DEBUG_QUESTIONS === "1") console.log(`[DIAG] attempt ${attempt}: before clickPrimaryButton`);
       const clicked = await this.clickPrimaryButton();
+      if (process.env.DEBUG_QUESTIONS === "1") console.log(`[DIAG] attempt ${attempt}: after clickPrimaryButton clicked=${clicked}`);
       if (!clicked) {
         return progressed;
       }
 
       progressed = true;
       await this.waitForQuestionnaireTransition();
+      if (process.env.DEBUG_QUESTIONS === "1") console.log(`[DIAG] attempt ${attempt}: after waitForQuestionnaireTransition`);
     }
 
     return progressed;
@@ -2559,6 +3204,34 @@ export class QuestionnairePage {
     return false;
   }
 
+  /**
+   * Records reachedOutcome for any outcome-config pattern currently visible
+   * on the page, without clicking anything or consuming the caller's
+   * "handled" return value -- unlike handleNHS111Popup/handleSelfCareResult,
+   * this exists purely so a result screen with no recognizable
+   * "Book Private Consultation"/"End assessment" button (e.g. Weight
+   * Management's "Patient doesn't qualified" banner) still gets captured
+   * before whatever generic Continue button the dialog has clicks past it.
+   */
+  private async captureOutcomeScreenIfVisible(): Promise<void> {
+    if (this.reachedOutcome) return;
+
+    const activeCondition = getActiveConditionName();
+    const outcomeConfig = getOutcomeConfig(activeCondition);
+    if (!outcomeConfig) return;
+
+    const screenText = await this.page.locator("body").innerText().catch(() => "");
+    const matchedOutcome = outcomeConfig.outcomes.find((o) =>
+      o.detectPatterns.some((p) => p.test(screenText)),
+    );
+    if (matchedOutcome) {
+      this.reachedOutcome = { id: matchedOutcome.id, label: matchedOutcome.label };
+      console.log(
+        `[QuestionnairePage] Outcome screen reached: ${this.reachedOutcome.label} — continuing the journey to completion`,
+      );
+    }
+  }
+
   private async handleNHS111Popup(): Promise<boolean> {
     if (await this.isOnPaymentPage()) {
       return false;
@@ -2600,15 +3273,52 @@ export class QuestionnairePage {
       return false;
     }
 
-    console.log(
-      "[QuestionnairePage] NHS 111 popup detected — clicking Book Private Consultation",
+    // Read the whole body's text rather than just popupRoot — popupRoot's
+    // own selector requires literal "NHS 111" text to match, so it's blind
+    // to any other outcome-config screen (GP Referral, Self Care) that
+    // renders through this same "Book Private Consultation"/"End
+    // assessment" dialog shape but with different heading text. Detection
+    // patterns are specific enough (e.g. /gp\s+referral/i) that reading the
+    // full page is safe here.
+    const popupText = await this.page.locator("body").innerText().catch(() => "");
+    if (process.env.DEBUG_QUESTIONS === "1") {
+      console.log(`[DEBUG_QUESTIONS] NHS111 popup text: ${JSON.stringify(popupText)}`);
+      const allButtons = await this.page.locator("button, a").allTextContents().catch(() => []);
+      console.log(`[DEBUG_QUESTIONS] Buttons/links visible on popup: ${JSON.stringify(allButtons.filter((t) => t.trim()))}`);
+    }
+
+    // ROOT CAUSE FIX (per explicit request): this used to always click
+    // "Book Private Consultation" WITHOUT recording that a real NHS 111 (or
+    // other outcome-config) result screen had just been shown — so
+    // outcome-specific runs targeting nhs111 always "failed" showing
+    // Gateway/booking instead, because nothing captured what actually
+    // happened before continuing on.
+    //
+    // Fix keeps the full journey going all the way to completion (per
+    // explicit follow-up request — do NOT stop the flow here) but now
+    // records which outcome screen was reached at the moment it was
+    // visible, so the final assertion can check the reachedOutcome that was
+    // actually shown rather than whatever screen the journey ends up on
+    // several steps later.
+    const activeCondition = getActiveConditionName();
+    const outcomeConfig = getOutcomeConfig(activeCondition);
+    const matchedOutcome = outcomeConfig?.outcomes.find((o) =>
+      o.detectPatterns.some((p) => p.test(popupText)),
     );
+    this.reachedOutcome = matchedOutcome
+      ? { id: matchedOutcome.id, label: matchedOutcome.label }
+      : { id: "unknown", label: "Unknown outcome screen" };
+
+    console.log(
+      `[QuestionnairePage] Outcome screen reached: ${this.reachedOutcome.label} — continuing the journey to completion`,
+    );
+
     await popupButton.scrollIntoViewIfNeeded().catch(() => {});
     await popupButton.click({ force: true }).catch(async () => {
       await popupButton!.evaluate((el: HTMLElement) => el.click());
     });
-
     await this.page.waitForLoadState("networkidle").catch(() => {});
+
     return true;
   }
 
@@ -2642,8 +3352,24 @@ export class QuestionnairePage {
     for (let i = 0; i < count; i++) {
       const btn = endAssessmentMatches.nth(i);
       if (await btn.isVisible().catch(() => false)) {
+        // ROOT CAUSE FIX (same class of bug as handleNHS111Popup): capture
+        // which outcome this screen actually is BEFORE clicking "End
+        // assessment" — that click navigates away (e.g. to the site's home
+        // page), so a live page re-scan done afterward (in the spec's final
+        // assertion) sees the WRONG page and can false-match an unrelated
+        // outcome's pattern against home-page content instead.
+        const screenText = await this.page.locator("body").innerText().catch(() => "");
+        const activeCondition = getActiveConditionName();
+        const outcomeConfig = getOutcomeConfig(activeCondition);
+        const matchedOutcome = outcomeConfig?.outcomes.find((o) =>
+          o.detectPatterns.some((p) => p.test(screenText)),
+        );
+        this.reachedOutcome = matchedOutcome
+          ? { id: matchedOutcome.id, label: matchedOutcome.label }
+          : { id: "unknown", label: "Unknown outcome screen" };
+
         console.log(
-          "[QuestionnairePage] Terminal result screen detected (no private-consultation option) — clicking End assessment",
+          `[QuestionnairePage] Terminal result screen detected (no private-consultation option): ${this.reachedOutcome.label} — clicking End assessment`,
         );
         await btn.scrollIntoViewIfNeeded().catch(() => {});
         await btn.click({ force: true }).catch(async () => {

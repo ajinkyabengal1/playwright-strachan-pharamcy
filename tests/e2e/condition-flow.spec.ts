@@ -1,6 +1,9 @@
 import { test, expect, Page } from "@playwright/test";
 import {
   TEST_USER,
+  TEST_USER_PDS,
+  TEST_USER_NON_PDS,
+  PDS_USER_MODE,
   ACTIVE_CONDITION,
   CART_PREFERENCES,
   DRUG_SELECTION_PREFERENCES,
@@ -8,6 +11,23 @@ import {
   THANK_YOU_PREFERENCES, PHARMACY_PREFERENCES,
   getActiveConditionName,
 } from "../fixtures/test-data";
+import { getOutcome, getOutcomeConfig } from "../fixtures/outcome-config";
+
+// OUTCOME_ID (e.g. "nhs111", "self_care", "gp_referral", "immediate_action",
+// or default "gateway") selects which outcome this run is verifying. The
+// signup identity (PDS vs non-PDS) is derived automatically from that
+// outcome's config entry — not chosen manually — per the requirement that
+// picking an outcome shouldn't require also remembering which user it needs.
+// For a direct (non-outcome) run, PDS_USER_MODE (dashboard Test Data toggle,
+// or PDS_USER_MODE env var override) picks the identity instead.
+const activeSlugForOutcome = process.env.CONDITION_SLUG || getActiveConditionName();
+const requestedOutcomeId = process.env.OUTCOME_ID;
+const requestedOutcome = requestedOutcomeId
+  ? getOutcome(activeSlugForOutcome, requestedOutcomeId)
+  : undefined;
+const resolvedUserType = requestedOutcome?.userType ?? PDS_USER_MODE;
+const PDS_LOOKUP_USER =
+  resolvedUserType === "pds" ? TEST_USER_PDS : TEST_USER_NON_PDS;
 import { ConditionsPage } from "../page-objects/ConditionsPage";
 import { ConditionDetailPage } from "../page-objects/ConditionDetailPage";
 import { GuestContinuePage } from "../page-objects/GuestContinuePage";
@@ -373,6 +393,199 @@ async function diagnoseIncompleteJourney(page: Page): Promise<string> {
   );
 }
 
+/**
+ * Matches the final screen's visible text against the active condition's
+ * configured outcome patterns (outcome-config.ts) to determine which
+ * outcome actually rendered. Returns null if the condition has no outcome
+ * config, or if the page doesn't match any known outcome for it.
+ */
+async function detectOutcomeScreen(
+  page: Page,
+  slug: string,
+): Promise<{ id: string; label: string } | null> {
+  const config = getOutcomeConfig(slug);
+  if (!config) return null;
+
+  const bodyText = await page.locator("body").innerText().catch(() => "");
+  for (const outcome of config.outcomes) {
+    if (outcome.detectPatterns.some((p) => p.test(bodyText))) {
+      return { id: outcome.id, label: outcome.label };
+    }
+  }
+  return null;
+}
+
+/**
+ * Most tenants send submit_questionnaire as multipart/form-data:
+ * answer_detail[N][question_detail_id] + answer_detail[N][answer] pairs,
+ * one N per answered question. Some answers arrive as "Option
+ * title®optionId" (a site-specific separator) — strip everything from "®"
+ * onward to get just the human answer text. A tenant that sends this as a
+ * plain JSON body instead (`{ answer_detail: [{ question_detail_id, answer }] }`)
+ * is also supported, so this isn't tied to one pharmacy's API shape.
+ */
+function parseSubmittedAnswers(body: string | Record<string, unknown>): { id: string; answer: string }[] {
+  if (typeof body === "object" && body !== null) {
+    const list = (body as any).answer_detail;
+    if (!Array.isArray(list)) return [];
+    return list
+      .filter((a: any) => a && a.question_detail_id != null && a.answer != null)
+      .map((a: any) => ({ id: String(a.question_detail_id), answer: String(a.answer).split("®")[0].trim() }));
+  }
+
+  const ids: Record<string, string> = {};
+  const idRe = /name="answer_detail\[(\d+)\]\[question_detail_id\]"\r?\n\r?\n(\d+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = idRe.exec(body))) ids[m[1]] = m[2];
+
+  const answers: Record<string, string> = {};
+  const ansRe = /name="answer_detail\[(\d+)\]\[answer\]"\r?\n\r?\n([\s\S]*?)\r?\n------/g;
+  while ((m = ansRe.exec(body))) answers[m[1]] = m[2].split("®")[0].trim();
+
+  return Object.keys(ids)
+    .filter((idx) => answers[idx] !== undefined)
+    .map((idx) => ({ id: ids[idx], answer: answers[idx] }));
+}
+
+/** Recursively maps question_detail_id -> plain-text title (HTML stripped), including conditional child questions. */
+/**
+ * ROOT CAUSE (0/3 matched despite correct answers): titles were only having
+ * HTML tags stripped, not entities — "&nbsp;" survived as literal text and,
+ * after normalizeForMatch() strips punctuation, left a stray "nbsp" word
+ * wedged into the string wherever the API title had one but our own
+ * getNearbyQuestionText()-derived text didn't (or vice versa). That broke
+ * full-string containment even though the real wording was identical.
+ */
+function decodeHtmlEntities(text: string): string {
+  return text
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+}
+
+function collectQuestionTitles(details: any[] | undefined, out: Record<string, string> = {}): Record<string, string> {
+  for (const q of details || []) {
+    if (q?.id != null) {
+      out[String(q.id)] = decodeHtmlEntities(String(q.title || "").replace(/<[^>]+>/g, ""))
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+    if (Array.isArray(q?.children)) collectQuestionTitles(q.children, out);
+  }
+  return out;
+}
+
+function normalizeForMatch(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+/**
+ * Compares "what we clicked" (QuestionnairePage.filledAnswers) against
+ * "what the submit_questionnaire API actually sent" (questionnaireSubmissions)
+ * — the ground truth, since it's exactly what the server received, not a
+ * scrape of some UI review screen that may not exist on every condition.
+ */
+/**
+ * The rule engine and the generic fallback can both observe the same
+ * already-answered question within the same pass (a brief race between one
+ * clicking it and the other re-checking it before the DOM's "checked" class
+ * updates), and some controls (range/date pickers) re-record their current
+ * value on every pass regardless of whether it changed — dedupe identical
+ * (question, answer) pairs so the count reflects real distinct answers.
+ * Shared by buildQaComparison() and the no-server-data fallback path in the
+ * spec (a run whose questionnaire has a file upload, where the submit
+ * request body is unrecoverable).
+ */
+function dedupeFilledAnswers(rawFilledAnswers: { question: string; answer: string }[]) {
+  const seen = new Set<string>();
+  return rawFilledAnswers.filter((f) => {
+    const key = `${normalizeForMatch(f.question)} ${normalizeForMatch(f.answer)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function buildQaComparison(
+  rawFilledAnswers: { question: string; answer: string }[],
+  submissions: { requestBody: string | Record<string, unknown>; responseBody: any }[],
+) {
+  const filledAnswers = dedupeFilledAnswers(rawFilledAnswers);
+
+  const submitted: { question: string; answer: string }[] = [];
+  for (const { requestBody, responseBody } of submissions) {
+    const titles = collectQuestionTitles(
+      responseBody?.data?.questionnaire?.questionnaire_template?.question_details,
+    );
+    for (const { id, answer } of parseSubmittedAnswers(requestBody)) {
+      submitted.push({ question: titles[id] || `Question #${id}`, answer });
+    }
+  }
+
+  // Token-overlap match rather than substring containment: adjacent DOM
+  // elements (e.g. a heading and the paragraph right after it) often
+  // concatenate with NO whitespace between them ("NoticeThis consultation"),
+  // while the API's HTML-sourced title has a normal space there ("Notice
+  // This") — after normalizing, that single missing space shifts every
+  // character after it, breaking positional substring matching on an
+  // otherwise-identical 400-character question. Comparing as a set of
+  // significant words (4+ letters, skips small connector words) sidesteps
+  // that entirely.
+  const significantWords = (text: string) =>
+    new Set(normalizeForMatch(text).split(" ").filter((w) => w.length >= 4));
+
+  // ROOT CAUSE (real data: "Weight" — a 1-word filled question — falsely
+  // matched a long, unrelated "This optional questionnaire asks about
+  // eating habits... weight..." submitted question, purely because "weight"
+  // is incidentally mentioned in that longer text): scoring by
+  // `shared / smaller` alone lets a 1-word question score a perfect 1.0
+  // against ANY longer question that happens to contain that one word,
+  // however unrelated. Also requiring shared words to cover a reasonable
+  // fraction of the LARGER side (not just the smaller one) rejects that —
+  // 1 shared word out of 1 is fine (small=1.0, large=1.0 for a genuine
+  // "Weight"="Weight" match) but 1 shared word out of 15 (large≈0.07) is
+  // not, even though the smaller side alone still scores 1.0.
+  const usedFilledIdx = new Set<number>();
+  const rows = submitted.map((s) => {
+    const submittedWords = significantWords(s.question);
+    let bestIdx = -1;
+    let bestOverlap = 0;
+    filledAnswers.forEach((f, idx) => {
+      if (usedFilledIdx.has(idx)) return;
+      const filledWords = significantWords(f.question);
+      const smaller = Math.min(submittedWords.size, filledWords.size) || 1;
+      const larger = Math.max(submittedWords.size, filledWords.size) || 1;
+      let shared = 0;
+      for (const w of submittedWords) if (filledWords.has(w)) shared++;
+      if (shared / larger < 0.3) return;
+      const overlap = shared / smaller;
+      if (overlap > bestOverlap) {
+        bestOverlap = overlap;
+        bestIdx = idx;
+      }
+    });
+    const match = bestOverlap >= 0.7 && bestIdx >= 0 ? filledAnswers[bestIdx] : null;
+    if (match) usedFilledIdx.add(bestIdx);
+    return {
+      question: s.question,
+      filledAnswer: match?.answer ?? null,
+      submittedAnswer: s.answer,
+      matched: !!match && normalizeForMatch(match.answer) === normalizeForMatch(s.answer),
+    };
+  });
+
+  return {
+    totalSubmitted: rows.length,
+    totalFilled: filledAnswers.length,
+    matchedCount: rows.filter((r) => r.matched).length,
+    mismatches: rows.filter((r) => !r.matched),
+    rows,
+  };
+}
+
 // ─── Main test ────────────────────────────────────────────────────────────────
 test.describe("Conditions flow", () => {
   test("complete conditions flow: Booking Page → signup → confirm page", async ({
@@ -405,6 +618,32 @@ test.describe("Conditions flow", () => {
       { method: string; url: string; headers: Record<string, string>; body: string | null; startTime: number }
     >();
 
+    // Every submit_questionnaire request/response this run made — the
+    // ground truth for "what actually got sent to the server", compared
+    // against questionnaire.filledAnswers ("what we clicked") once the
+    // journey finishes. Multi-step questionnaires (e.g. Weight Management)
+    // submit once per template, so this can have more than one entry.
+    const questionnaireSubmissions: { requestBody: string | Record<string, unknown>; responseBody: any }[] = [];
+
+    // ROOT CAUSE (Q&A Verification only ever worked on Kepple Lane): the
+    // whitelist below existed for the dashboard's own API-call tracking
+    // feature and happened to include the literal string
+    // "submit_questionnaire" -- Kepple Lane's actual endpoint name -- so
+    // the Q&A comparison silently only ever captured a request on THAT one
+    // pharmacy. Every tenant here shares the same component conventions
+    // (hq-question classes, identical Tailwind CTA button classes, the same
+    // Sanity condition catalog), strongly suggesting one shared backend
+    // platform under different tenant frontends -- but each tenant could
+    // still name its own endpoint differently. Track EVERY POST request's
+    // body here (cheap: just a string reference, not parsed/processed) so
+    // the response handler below can recognize a questionnaire submission
+    // by its BODY SHAPE (the platform's own "answer_detail[...]" field
+    // naming convention) regardless of what URL a given tenant uses for it.
+    const pendingPostBodies = new Map<
+      string,
+      { body: string | null; startTime: number }
+    >();
+
     page.on("request", (req) => {
       const url = req.url();
       // Only track the specific whitelisted APIs
@@ -423,15 +662,82 @@ test.describe("Conditions flow", () => {
           method: req.method(),
           url: req.url(),
           headers: req.headers(),
-          body: req.postData() || null,
+          // ROOT CAUSE (submit_questionnaire captured as null body on any
+          // condition whose questionnaire includes a file upload, e.g. "All
+          // Test Question"): req.postData() returns null for a multipart
+          // body once it contains binary content — Playwright can't
+          // guarantee it decodes as text. postDataBuffer() still returns
+          // the raw bytes; decoding as latin1 (byte-for-byte, no charset
+          // reinterpretation) keeps the multipart boundary/field lines
+          // readable as text even with an opaque binary chunk embedded
+          // between them, which is all parseSubmittedAnswers() needs.
+          body: req.postData() || req.postDataBuffer()?.toString("latin1") || null,
           startTime: Date.now(),
         });
+      } else if (["POST", "PUT", "PATCH"].includes(req.method())) {
+        const body = req.postData() || req.postDataBuffer()?.toString("latin1") || null;
+        pendingPostBodies.set(req.url() + req.method(), {
+          body,
+          startTime: Date.now(),
+        });
+        if (process.env.DEBUG_QUESTIONS === "1") {
+          console.log(`[DIAG] non-whitelisted ${req.method()}: ${url} bodyPreview=${(body || "").slice(0, 3000)}`);
+        }
       }
     });
+
+    // ROOT CAUSE FIX continued (see pendingPostBodies comment above): any
+    // POST not already claimed by the whitelisted handler is checked here
+    // by its BODY SHAPE alone -- the platform's "answer_detail[N][...]"
+    // multipart field convention (confirmed live on Kepple Lane's own
+    // "submit_questionnaire" calls), or the JSON equivalent (an
+    // "answer_detail" array/object key) -- so a differently-named endpoint
+    // on another tenant still gets recognized as a real questionnaire
+    // submission instead of silently producing an empty Q&A table.
+    const looksLikeQuestionnaireSubmission = (body: string | null): boolean => {
+      if (!body) return false;
+      if (body.includes("answer_detail[")) return true; // multipart form-data
+      if (/"answer_detail"\s*:/.test(body)) return true; // JSON body
+      return false;
+    };
 
     page.on("response", async (res) => {
       const req = res.request();
       const key = req.url() + req.method();
+      const pendingPost = pendingPostBodies.get(key);
+      if (pendingPost) {
+        pendingPostBodies.delete(key);
+        if (looksLikeQuestionnaireSubmission(pendingPost.body)) {
+          let genericResponseBody: unknown = null;
+          try {
+            const ct = res.headers()["content-type"] || "";
+            if (ct.includes("json") || ct.includes("text")) {
+              const text = await res.text().catch(() => "");
+              if (text) {
+                try {
+                  genericResponseBody = JSON.parse(text);
+                } catch {
+                  genericResponseBody = text.substring(0, 2000);
+                }
+              }
+            }
+          } catch {}
+          let genericRequestBody: unknown = pendingPost.body;
+          try {
+            genericRequestBody = JSON.parse(pendingPost.body as string);
+          } catch {}
+          questionnaireSubmissions.push({
+            requestBody: genericRequestBody as string | Record<string, unknown>,
+            responseBody: genericResponseBody,
+          });
+          if (process.env.DEBUG_QUESTIONS === "1") {
+            console.log(`[DEBUG_QUESTIONS] dynamically-detected questionnaire submission at ${req.url()}`);
+            console.log(`[DEBUG_QUESTIONS] requestBody: ${JSON.stringify(genericRequestBody).slice(0, 4000)}`);
+            console.log(`[DEBUG_QUESTIONS] responseBody: ${JSON.stringify(genericResponseBody).slice(0, 6000)}`);
+          }
+        }
+      }
+
       const pending = pendingRequests.get(key);
       if (!pending) return;
       pendingRequests.delete(key);
@@ -467,6 +773,17 @@ test.describe("Conditions flow", () => {
           requestBody = JSON.parse(pending.body);
         } catch {
           requestBody = pending.body;
+        }
+      }
+
+      if (
+        (pending.url.includes("submit_questionnaire") || looksLikeQuestionnaireSubmission(pending.body)) &&
+        (typeof requestBody === "string" || (requestBody && typeof requestBody === "object"))
+      ) {
+        questionnaireSubmissions.push({ requestBody: requestBody as string | Record<string, unknown>, responseBody });
+        if (process.env.DEBUG_QUESTIONS === "1") {
+          console.log(`[DEBUG_QUESTIONS] submit_questionnaire requestBody: ${JSON.stringify(requestBody).slice(0, 4000)}`);
+          console.log(`[DEBUG_QUESTIONS] submit_questionnaire responseBody: ${JSON.stringify(responseBody).slice(0, 6000)}`);
         }
       }
 
@@ -732,8 +1049,15 @@ test.describe("Conditions flow", () => {
             // instead of a booking being made — so count it as completed
             // rather than failing the run for never reaching a booking.
             if (questionnaire.endedWithoutBooking) {
+              // The journey still completes successfully either way — only
+              // the log message differs: a tracked outcome screen (NHS 111,
+              // GP Referral, etc.) isn't a "pharmacist review" case, so say
+              // which outcome was actually reached instead of always using
+              // that generic phrase.
               console.log(
-                "✔ Assessment ended without booking (pharmacist review) — journey completed",
+                questionnaire.reachedOutcome
+                  ? `✔ Outcome screen reached: ${questionnaire.reachedOutcome.label} — journey completed`
+                  : "✔ Assessment ended without booking (pharmacist review) — journey completed",
               );
               journeyStatus = "completed";
               flowCompleted = true;
@@ -788,13 +1112,15 @@ test.describe("Conditions flow", () => {
 
             if (hasNHSForm) {
               await signup.waitForPage();
-              console.log("[spec] fillNHSPDSForm starting...");
+              console.log(
+                `[spec] fillNHSPDSForm starting (userType=${resolvedUserType}, firstName=${PDS_LOOKUP_USER.firstName}, dob=${PDS_LOOKUP_USER.dob.display})...`,
+              );
               await signup.fillNHSPDSForm({
-                firstName: TEST_USER.firstName,
-                lastName: TEST_USER.lastName,
-                postcode: TEST_USER.postcode,
-                gender: TEST_USER.gender,
-                dobIso: TEST_USER.dob.iso,
+                firstName: PDS_LOOKUP_USER.firstName,
+                lastName: PDS_LOOKUP_USER.lastName,
+                postcode: PDS_LOOKUP_USER.postcode,
+                gender: PDS_LOOKUP_USER.gender,
+                dobIso: PDS_LOOKUP_USER.dob.iso,
               });
               const activeSlug =
                 process.env.CONDITION_SLUG || getActiveConditionName();
@@ -877,8 +1203,144 @@ test.describe("Conditions flow", () => {
       }
     });
 
+    // ─── Questionnaire Q&A verification ──────────────────────────────────
+    // For every condition that has a questionnaire: compare what this
+    // automation actually clicked/typed against what the submit_questionnaire
+    // API call really sent to the server — the ground truth, not a scrape of
+    // a review screen (most conditions don't have one).
+    if (questionnaireSubmissions.length > 0 || questionnaire.filledAnswers.length > 0) {
+      if (process.env.DEBUG_QUESTIONS === "1") {
+        console.log(`[DEBUG_QUESTIONS] filledAnswers: ${JSON.stringify(questionnaire.filledAnswers)}`);
+      }
+      // Some questionnaires (e.g. "All Test Question") include a file
+      // upload — when a request body contains a File/Blob, Chromium's
+      // DevTools Protocol does not retain the raw POST data for ANY
+      // inspection API (request.postData()/postDataBuffer() both return
+      // null), so the server's actual submission is unrecoverable. Rather
+      // than silently show nothing, still report what we filled — every
+      // question type (date, range, checkbox, select, file, etc. — see the
+      // recordAnswer() calls throughout QuestionnairePage) — with the
+      // "submitted" side marked unverified instead of a false mismatch.
+      const comparison =
+        questionnaireSubmissions.length > 0
+          ? buildQaComparison(questionnaire.filledAnswers, questionnaireSubmissions)
+          : (() => {
+              const deduped = dedupeFilledAnswers(questionnaire.filledAnswers);
+              return {
+                totalFilled: deduped.length,
+                totalSubmitted: 0,
+                matchedCount: 0,
+                mismatches: [],
+                rows: deduped.map((f) => ({
+                  question: f.question,
+                  filledAnswer: f.answer,
+                  submittedAnswer: null as string | null,
+                  matched: false,
+                  unverified: true,
+                })),
+              };
+            })();
+      // Always emitted — dashboard.js parses this tag into a real HTML
+      // table (renderQaTable) and does NOT forward the raw line itself.
+      console.log(`📋 QA_COMPARISON: ${JSON.stringify(comparison)}`);
+
+      // The dashboard renders its own table from the line above; this
+      // ASCII-art version is redundant there (would show twice) and is only
+      // useful for plain `npx playwright test` runs with no dashboard.
+      if (!process.env.RUN_VIA_DASHBOARD) {
+        const truncate = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
+        const summaryLine = `Filled       Submitted       Matched`;
+        const summaryValues = `  ${comparison.totalFilled}              ${comparison.totalSubmitted}             ${comparison.matchedCount}/${comparison.totalSubmitted}`;
+
+        console.log("");
+        console.log("Questionnaire Answer Verification");
+        console.log("");
+        console.log("┌─────────────────────────────────────────────┐");
+        console.log(`│ ${summaryLine}        │`);
+        console.log(`│${summaryValues}          │`);
+        console.log("└─────────────────────────────────────────────┘");
+        console.log("");
+        console.log("Question | Filled Answer | Submitted Answer | Status");
+        console.log("------------------------------------------------------");
+        comparison.rows.forEach((row: any, i) => {
+          const status = row.unverified ? "UNVERIFIED" : row.matched ? "MATCH" : "MISMATCH";
+          console.log(
+            `Q${i + 1}       | ${truncate(row.filledAnswer ?? "(no match)", 30)} | ${truncate(row.submittedAnswer ?? "(unavailable)", 30)} | ${status}`,
+          );
+        });
+
+        if (comparison.mismatches.length > 0) {
+          console.log("");
+          console.log("Mismatch Details");
+          for (const row of comparison.mismatches) {
+            console.log("");
+            console.log(`Question: ${truncate(row.question, 200)}`);
+            console.log("");
+            console.log(`Filled:`);
+            console.log(row.filledAnswer ?? "(no matching filled answer found)");
+            console.log("");
+            console.log(`Submitted:`);
+            console.log(row.submittedAnswer);
+            console.log("");
+            console.log(`Status: ❌ MISMATCH`);
+            console.log(
+              `Reason: ${row.filledAnswer === null ? "No corresponding filled answer could be matched to this question" : "Answers are different"}`,
+            );
+          }
+        }
+      }
+    }
+
     // ─── Final assertion ──────────────────────────────────────────────────
     await test.step("Verify journey completion", async () => {
+      if (requestedOutcomeId) {
+        // Outcome-specific run: success means landing on the SELECTED
+        // outcome screen, not just "did a booking complete" — a rejection
+        // outcome (NHS 111 / GP Referral / Immediate Action) never reaches
+        // a booking confirmation, so the default isConfirmed check below
+        // would always fail these on purpose. Skip it entirely here.
+        // Prefer the outcome QuestionnairePage captured live (at the moment
+        // the screen was actually visible) over a fresh page re-scan here —
+        // by this point the dialog may already be dismissed for tidiness
+        // (see handleNHS111Popup), so a live re-scan alone would find the
+        // page already moved on and wrongly report "Unknown".
+        const detected =
+          questionnaire.reachedOutcome ??
+          (await detectOutcomeScreen(page, activeSlugForOutcome));
+        const expectedLabel = requestedOutcome?.label ?? requestedOutcomeId;
+        const actualLabel = detected?.label ?? "Unknown";
+        const passed = !!detected && detected.id === requestedOutcomeId;
+
+        console.log(
+          `🎯 OUTCOME_RESULT: ${JSON.stringify({
+            condition: activeSlugForOutcome,
+            userType: resolvedUserType,
+            expected: expectedLabel,
+            actual: actualLabel,
+            passed,
+          })}`,
+        );
+        console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        console.log("Outcome Test");
+        console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        console.log(`Condition: ${activeSlugForOutcome}`);
+        console.log(`User: ${resolvedUserType === "pds" ? "PDS" : "Non-PDS"}`);
+        console.log(`Expected Outcome: ${expectedLabel}`);
+        console.log(`Actual Outcome: ${actualLabel}`);
+        console.log(
+          passed
+            ? "✅ TEST PASSED"
+            : `❌ TEST FAILED — Expected ${expectedLabel} but ${actualLabel} was displayed.`,
+        );
+        console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+        expect(
+          passed,
+          `Expected outcome "${expectedLabel}" but detected "${actualLabel}"`,
+        ).toBe(true);
+        return;
+      }
+
       const isConfirmed =
         journeyStatus === "completed" || (await signup.isBookingConfirmed());
       console.log(
@@ -924,8 +1386,15 @@ test.describe("Conditions flow", () => {
         }
       }
 
-      // Explicitly close the page to trigger immediate browser shutdown
-      await page.close();
+      // ROOT CAUSE (test showed "COMPLETED SUCCESSFUL" / all assertions
+      // passed, yet the run still reported "1 failed"): this explicit
+      // page.close() raced with Playwright's own trace.zip export, which
+      // happens as part of the fixture's normal end-of-test teardown —
+      // closing the page early here left trace.zip missing by the time the
+      // reporter tried to attach it, and a failed attachment is reported as
+      // a failed test regardless of the test's own assertions. Removed —
+      // the fixture already closes the page after the test function
+      // returns, in the correct order (trace saved first).
     });
   });
 });

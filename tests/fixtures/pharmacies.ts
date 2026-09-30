@@ -36,4 +36,19 @@ export const PHARMACY_SITES: PharmacySite[] = [
     baseURL: "https://icare-pharmacy.vercel.app/",
     ciSkip: true,
   },
+  {
+    name: "Meadows Pharmacy",
+    baseURL: "https://meadows-pharmacy.vercel.app/",
+    ciSkip: true,
+  },
+  {
+    name: "Acre Pharmacy",
+    baseURL: "https://acre-pharmacy.vercel.app/",
+    ciSkip: true,
+  },
+  {
+    name: "J Morris Pharmacy",
+    baseURL: "https://j-morris-pharmacy.vercel.app/",
+    ciSkip: true,
+  },
 ];

@@ -542,6 +542,12 @@
         border-radius: 8px;
         border: 1px solid transparent;
         cursor: default;
+        /* The earlier .tree-test rule (plain test rows) sets display:flex in a
+           row direction and this block doesn't reset it — without flex-wrap,
+           .outcomes-children (a later sibling of .tc-main-row, both direct
+           children of .tree-test) sits BESIDE the row instead of below it.
+           Wrapping forces it onto its own full-width line underneath. */
+        flex-wrap: wrap;
       }
       .tree-test:hover { border-color: var(--clr-border); background: var(--clr-hover); }
       .tree-test.active { border-color: var(--clr-accent); background: rgba(124,106,247,0.08); }
@@ -551,6 +557,7 @@
         align-items: center;
         gap: 8px;
         padding: 7px 10px 7px 10px;
+        width: 100%;
       }
 
       /* TC-### badge */
@@ -636,6 +643,217 @@
       .tc-info-icon:hover {
         background: var(--clr-accent);
         color: #fff;
+      }
+
+      /* Outcome-screen sub-list under a condition */
+      .outcomes-toggle-btn {
+        opacity: 1;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 22px;
+        height: 22px;
+        padding: 0;
+        border-radius: 4px;
+        border: none;
+        color: var(--clr-txt-sidebar);
+        background: transparent;
+        cursor: pointer;
+        flex-shrink: 0;
+      }
+      .outcomes-toggle-btn:hover {
+        color: var(--clr-accent);
+        background: var(--clr-hover);
+      }
+      /* CSS-drawn chevron (two border lines, not a filled shape) so it
+         renders crisply at any size instead of relying on a unicode glyph
+         that can look like a stray comma when small. */
+      .outcomes-toggle-arrow {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-right: 2px solid currentColor;
+        border-bottom: 2px solid currentColor;
+        transform: rotate(-45deg);
+        transition: transform 0.15s;
+      }
+      .outcomes-toggle-btn.open .outcomes-toggle-arrow {
+        transform: rotate(45deg);
+      }
+      .outcomes-children {
+        padding: 2px 10px 8px 40px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        width: 100%;
+        box-sizing: border-box;
+      }
+      /* ROOT CAUSE FIX (dropdown looked like it toggled -- chevron rotated
+         correctly -- but the panel itself never actually hid): this class
+         rule's `display: flex` and the browser's built-in `[hidden] {
+         display: none }` UA rule have the SAME specificity (0,1,0 each), so
+         whichever comes later in the cascade wins -- this author rule beat
+         the UA default, silently overriding `hidden` every time. */
+      .outcomes-children[hidden] {
+        display: none;
+      }
+      .outcomes-loading,
+      .outcomes-empty {
+        font-size: 11px;
+        color: var(--clr-txt-muted);
+        padding: 4px 0;
+      }
+      .outcome-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 8px;
+        border-radius: 6px;
+        background: var(--clr-hover);
+        font-size: 11px;
+      }
+      .outcome-label {
+        flex: 1;
+        color: var(--clr-txt-sidebar);
+        font-weight: 500;
+      }
+      .outcome-user-tag {
+        font-size: 9px;
+        font-weight: 700;
+        letter-spacing: 0.03em;
+        padding: 1px 6px;
+        border-radius: 4px;
+        background: var(--clr-accent);
+        color: #fff;
+        opacity: 0.75;
+        flex-shrink: 0;
+      }
+      .outcome-run-btn {
+        font-size: 10px;
+        padding: 2px 7px;
+        border-radius: 4px;
+        border: 1px solid var(--clr-accent);
+        color: var(--clr-accent);
+        background: transparent;
+        cursor: pointer;
+        flex-shrink: 0;
+      }
+      .outcome-run-btn:hover {
+        background: var(--clr-accent);
+        color: #fff;
+      }
+
+      /* Questionnaire Q&A verification table (Output panel) */
+      .qa-table-wrap {
+        margin: 10px 0;
+        border: 1px solid var(--clr-border);
+        border-radius: 8px;
+        overflow: hidden;
+        background: var(--clr-surface);
+      }
+      .qa-table-summary {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 16px;
+        padding: 10px 14px;
+        background: var(--clr-hover);
+        border-bottom: 1px solid var(--clr-border);
+        font-size: 12px;
+      }
+      .qa-table-title {
+        font-weight: 700;
+        color: var(--clr-txt-sidebar);
+      }
+      .qa-table-stat {
+        color: var(--clr-txt-muted);
+      }
+      .qa-table-stat b {
+        color: var(--clr-txt-sidebar);
+      }
+      .qa-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12px;
+      }
+      .qa-table th {
+        text-align: left;
+        padding: 8px 10px;
+        background: var(--clr-hover);
+        color: var(--clr-txt-muted);
+        font-weight: 600;
+        border-bottom: 1px solid var(--clr-border);
+        white-space: nowrap;
+      }
+      .qa-table td {
+        padding: 8px 10px;
+        border-bottom: 1px solid var(--clr-border);
+        color: var(--clr-txt-sidebar);
+        vertical-align: top;
+      }
+      .qa-table .qa-question {
+        max-width: 320px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .qa-table tr:last-child td {
+        border-bottom: none;
+      }
+      .qa-row-mismatch {
+        background: rgba(255, 90, 90, 0.08);
+      }
+      .qa-row-mismatch td:last-child {
+        color: var(--clr-fail);
+        font-weight: 600;
+      }
+      .qa-row-match td:last-child {
+        color: var(--clr-pass);
+        font-weight: 600;
+      }
+      .qa-row-unverified td:last-child {
+        color: var(--clr-txt-muted);
+        font-weight: 600;
+        font-style: italic;
+      }
+
+      /* PDS/Non-PDS toggle switch (User Info section header) */
+      .toggle-switch {
+        position: relative;
+        display: inline-block;
+        width: 34px;
+        height: 18px;
+        flex-shrink: 0;
+      }
+      .toggle-switch input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+      .toggle-switch-slider {
+        position: absolute;
+        inset: 0;
+        background: var(--clr-border);
+        border-radius: 999px;
+        transition: background 0.15s;
+        cursor: pointer;
+      }
+      .toggle-switch-slider::before {
+        content: "";
+        position: absolute;
+        width: 14px;
+        height: 14px;
+        left: 2px;
+        top: 2px;
+        background: #fff;
+        border-radius: 50%;
+        transition: transform 0.15s;
+      }
+      .toggle-switch input:checked + .toggle-switch-slider {
+        background: var(--clr-accent);
+      }
+      .toggle-switch input:checked + .toggle-switch-slider::before {
+        transform: translateX(16px);
       }
       /* Tooltip via pseudo-element */
       .tc-info-icon::before {
@@ -1629,9 +1847,23 @@
                   font-weight: 600;
                   font-size: 14px;
                   cursor: pointer;
+                  display: flex;
+                  align-items: center;
+                  justify-content: space-between;
                 "
               >
-                👤 User Info
+                <span>👤 User Info</span>
+                <label
+                  class="pds-toggle-label"
+                  onclick="event.stopPropagation()"
+                  style="display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 500; color: var(--clr-txt-muted); cursor: pointer;"
+                >
+                  <span class="toggle-switch">
+                    <input type="checkbox" id="pdsUserToggle" />
+                    <span class="toggle-switch-slider"></span>
+                  </span>
+                  PDS user
+                </label>
               </div>
               <div
                 class="td-section-body"
@@ -2042,6 +2274,10 @@
         logEl.innerHTML = "";
         if (item.savedLogs) {
           item.savedLogs.forEach(l => {
+            if (l.isQaTable) {
+              logEl.appendChild(buildQaTableElement(l.comparison));
+              return;
+            }
             const line = document.createElement("div");
             if (l.className) line.className = l.className;
             line.textContent = l.text;
@@ -2082,6 +2318,63 @@
       }
       function clearLog() {
         logEl.innerHTML = "";
+      }
+
+      // Renders the questionnaire filled-vs-submitted comparison as a real
+      // table in the Output panel instead of a wall of JSON text.
+      function buildQaTableElement(comparison) {
+        const wrap = document.createElement("div");
+        wrap.className = "qa-table-wrap";
+
+        const summary = document.createElement("div");
+        summary.className = "qa-table-summary";
+        const hasServerData = comparison.totalSubmitted > 0;
+        summary.innerHTML = `
+          <span class="qa-table-title">📋 Questionnaire Answer Verification</span>
+          <span class="qa-table-stat">Filled: <b>${comparison.totalFilled}</b></span>
+          <span class="qa-table-stat">Submitted: <b>${hasServerData ? comparison.totalSubmitted : "N/A"}</b></span>
+          <span class="qa-table-stat">Matched: <b>${hasServerData ? `${comparison.matchedCount}/${comparison.totalSubmitted}` : "N/A"}</b></span>
+          ${hasServerData ? "" : '<span class="qa-table-stat" style="font-style:italic;">(server body unavailable — file upload in this questionnaire)</span>'}
+        `;
+        wrap.appendChild(summary);
+
+        const table = document.createElement("table");
+        table.className = "qa-table";
+        table.innerHTML = `
+          <thead>
+            <tr><th>#</th><th>Question</th><th>Filled Answer</th><th>Submitted Answer</th><th>Status</th></tr>
+          </thead>
+          <tbody></tbody>
+        `;
+        const tbody = table.querySelector("tbody");
+        (comparison.rows || []).forEach((row, i) => {
+          const tr = document.createElement("tr");
+          tr.className = row.unverified ? "qa-row-unverified" : row.matched ? "qa-row-match" : "qa-row-mismatch";
+          const esc = (s) => (s ?? "").toString().replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+          const status = row.unverified ? "ℹ️ UNVERIFIED" : row.matched ? "✅ MATCH" : "❌ MISMATCH";
+          tr.innerHTML = `
+            <td>Q${i + 1}</td>
+            <td class="qa-question" title="${esc(row.question)}">${esc(row.question)}</td>
+            <td>${esc(row.filledAnswer ?? "(no match)")}</td>
+            <td>${row.submittedAnswer == null ? "(unavailable — file upload prevents capturing this request)" : esc(row.submittedAnswer)}</td>
+            <td>${status}</td>
+          `;
+          tbody.appendChild(tr);
+        });
+        wrap.appendChild(table);
+        return wrap;
+      }
+
+      function renderQaTable(comparison) {
+        if (currentlyViewingId === currentRunId || currentlyViewingId === null) {
+          logEl.appendChild(buildQaTableElement(comparison));
+          logEl.scrollTop = logEl.scrollHeight;
+        }
+        const idx = testQueue.findIndex((q) => q.id === currentRunId);
+        if (idx >= 0) {
+          if (!testQueue[idx].savedLogs) testQueue[idx].savedLogs = [];
+          testQueue[idx].savedLogs.push({ isQaTable: true, comparison });
+        }
       }
       function classifyLog(text) {
         if (/passed|✓|PASS/i.test(text)) return "log-pass";
@@ -2203,6 +2496,18 @@
             }
           } catch (e) {
             console.warn("Failed to fetch sanity conditions", e);
+          }
+
+          // Only conditions with real outcome data get the outcomes toggle
+          // (previously shown for every condition regardless of whether
+          // there was anything behind it).
+          window.outcomeEnabledSlugs = new Set();
+          try {
+            const outcomeSlugsRes = await fetch("/api/outcome-enabled-slugs");
+            const outcomeSlugsData = await outcomeSlugsRes.json();
+            (outcomeSlugsData.slugs || []).forEach((s) => window.outcomeEnabledSlugs.add(s));
+          } catch (e) {
+            console.warn("Failed to fetch outcome-enabled slugs", e);
           }
 
           setStatus(
@@ -2362,6 +2667,11 @@
         }
       }
 
+      // Cache of /api/condition-outcomes results per slug, so re-expanding a
+      // condition (or re-rendering the tree on a filter keystroke) doesn't
+      // re-fetch every time.
+      const conditionOutcomesCache = new Map();
+
       function makeTestNode(t, extraClass, tcIndex) {
         const tcId = tcIndex != null ? `TC-${String(tcIndex).padStart(3, "0")}` : "TC-???";
         const tooltip = `Slug: ${t._slug} — Steps: Navigate to conditions page → Select condition → Book appointment → Sign up or log in → Verify confirmation`;
@@ -2369,6 +2679,8 @@
         const div = document.createElement("div");
         div.className = ["tree-test", extraClass].filter(Boolean).join(" ");
         div.dataset.fullTitle = t.fullTitle || t.title;
+
+        const hasOutcomes = !!(window.outcomeEnabledSlugs && window.outcomeEnabledSlugs.has(t._slug));
 
         div.innerHTML = `
           <div class="tc-main-row">
@@ -2380,8 +2692,10 @@
             <div class="tc-actions">
               <button class="run-test-btn" title="Run this test case">▶</button>
               <span class="tc-info-icon" tabindex="0" role="img" aria-label="Test case description" data-tooltip="${tooltip}">i</span>
+              ${hasOutcomes ? '<button class="outcomes-toggle-btn" title="Show outcome screens for this condition"><span class="outcomes-toggle-arrow"></span></button>' : ""}
             </div>
           </div>
+          <div class="outcomes-children" hidden></div>
         `;
 
         div.querySelector(".run-test-btn").addEventListener("click", (e) => {
@@ -2389,8 +2703,68 @@
           startRun({ file: t.file, line: t.line, grep: t.fullTitle, label: t._testName || t.title, slug: t._slug });
         });
 
+        const outcomesChildren = div.querySelector(".outcomes-children");
+        const outcomesToggleBtn = div.querySelector(".outcomes-toggle-btn");
+        if (outcomesToggleBtn) outcomesToggleBtn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          const willOpen = outcomesChildren.hasAttribute("hidden");
+          outcomesToggleBtn.classList.toggle("open", willOpen);
+          if (!willOpen) {
+            outcomesChildren.setAttribute("hidden", "");
+            return;
+          }
+
+          if (!conditionOutcomesCache.has(t._slug)) {
+            outcomesChildren.innerHTML = `<div class="outcomes-loading">Loading outcomes…</div>`;
+            outcomesChildren.removeAttribute("hidden");
+            try {
+              const res = await fetch(`/api/condition-outcomes?slug=${encodeURIComponent(t._slug)}`);
+              const data = await res.json();
+              conditionOutcomesCache.set(t._slug, data.result || []);
+            } catch (err) {
+              conditionOutcomesCache.set(t._slug, []);
+            }
+          }
+
+          const outcomes = conditionOutcomesCache.get(t._slug) || [];
+          if (outcomes.length === 0) {
+            outcomesChildren.innerHTML = `<div class="outcomes-empty">No outcome screens configured for this condition yet.</div>`;
+          } else {
+            outcomesChildren.innerHTML = "";
+            outcomes.forEach((o) => {
+              const row = document.createElement("div");
+              row.className = "outcome-row";
+              row.innerHTML = `
+                <span class="outcome-label">${o.label}</span>
+                <span class="outcome-user-tag">${o.userType === "pds" ? "PDS" : "Non-PDS"}</span>
+                <button class="outcome-run-btn" title="Verify this outcome">▶</button>
+              `;
+              row.querySelector(".outcome-run-btn").addEventListener("click", (ev) => {
+                ev.stopPropagation();
+                startRun({
+                  file: t.file,
+                  line: t.line,
+                  grep: t.fullTitle,
+                  label: `${t._testName || t.title} — ${o.label}`,
+                  slug: t._slug,
+                  outcome: o.id,
+                });
+              });
+              outcomesChildren.appendChild(row);
+            });
+          }
+          outcomesChildren.removeAttribute("hidden");
+        });
+
         div.addEventListener("click", (e) => {
-          if (e.target.classList.contains("run-test-btn") || e.target.classList.contains("tc-info-icon")) return;
+          if (
+            e.target.classList.contains("run-test-btn") ||
+            e.target.classList.contains("tc-info-icon") ||
+            e.target.classList.contains("outcomes-toggle-btn") ||
+            e.target.closest(".outcomes-children")
+          ) {
+            return;
+          }
           document.querySelectorAll(".tree-test").forEach((n) => n.classList.remove("active"));
           div.classList.add("active");
           startRun({ file: t.file, line: t.line, grep: t.fullTitle, label: t._testName || t.title, slug: t._slug });
@@ -2562,6 +2936,7 @@
         if (grep) params.set("grep", grep);
         if (label) params.set("label", label);
         if (arguments[0].slug) params.set("slug", arguments[0].slug);
+        if (arguments[0].outcome) params.set("outcome", arguments[0].outcome);
 
         activeES = new EventSource(`/api/run-tests?${params}`);
 
@@ -2610,6 +2985,8 @@
               const idx = testQueue.findIndex((q) => q.id === currentRunId);
               if (idx >= 0) testQueue[idx].lastUrl = m[0];
             }
+          } else if (type === "qa_table") {
+            renderQaTable(data);
           } else if (type === "done") {
             running = false;
             activeES.close();
@@ -2772,6 +3149,9 @@
           testdataForm.elements["dobYear"].value = u.dobYear || "";
           testdataForm.elements["guardianName"].value = u.guardianName || "";
 
+          const pdsToggle = document.getElementById("pdsUserToggle");
+          if (pdsToggle) pdsToggle.checked = currentTestData.pdsUserMode === "pds";
+
           const q = currentTestData.questionnaire || {};
           const fillModeRadios = testdataForm.elements["questionnaireFillMode"];
           if (fillModeRadios) fillModeRadios.value = q.fillMode || "fill-all";
@@ -2787,6 +3167,19 @@
           await loadBranches(pharmacyData?.baseURL, savedBranch);
         } catch (e) {}
       }
+
+      // Toggling PDS user fills the whole identity (mirrors TEST_USER_PDS /
+      // TEST_USER_NON_PDS in tests/fixtures/test-data.ts) directly into the
+      // visible form fields, not just an internal flag. Values stay
+      // editable afterward like any other field.
+      document.getElementById("pdsUserToggle").addEventListener("change", (e) => {
+        const identity = e.target.checked
+          ? { firstName: "Lloyd", lastName: "PEENEY", email: "lloyd.p2@yopmail.com", phone: "447467059973", postcode: "HD59LT", gender: "male", dobDay: "15", dobMonth: "04", dobYear: "1962" }
+          : { firstName: "mikes", lastName: "PEENEY", email: "lloyd.p2@yopmail.com", phone: "447467059973", postcode: "HD59LT", gender: "male", dobDay: "17", dobMonth: "04", dobYear: "1962" };
+        for (const [field, value] of Object.entries(identity)) {
+          testdataForm.elements[field].value = value;
+        }
+      });
 
       testdataForm.addEventListener("submit", async (e) => {
         e.preventDefault();
@@ -2805,6 +3198,10 @@
         u.dobMonth = testdataForm.elements["dobMonth"].value;
         u.dobYear = testdataForm.elements["dobYear"].value;
         u.guardianName = testdataForm.elements["guardianName"].value;
+
+        currentTestData.pdsUserMode = document.getElementById("pdsUserToggle").checked
+          ? "pds"
+          : "non_pds";
 
         currentTestData.questionnaire = {
           fillMode: testdataForm.elements["questionnaireFillMode"].value,

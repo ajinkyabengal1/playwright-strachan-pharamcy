@@ -212,6 +212,36 @@ const FLOW_CONFIGS = [
   { name: "Private — specific date, saved card",    group: "Private", conditionJourneyType: "private" },
 ];
 
+// ── Condition outcomes (mirrors tests/fixtures/outcome-config.ts — JS copy for dashboard) ──
+// Keep the outcome list (id/label/userType) in sync by hand when the .ts
+// source changes — detectPatterns aren't needed here since the dashboard
+// only lists outcomes, it never evaluates a page against them.
+const CONDITION_OUTCOMES = [
+  {
+    slug: "shingles-herpes-zoster-nhs",
+    gateway: "nhs",
+    outcomes: [
+      { id: "gateway", label: "Booking (Gateway)", userType: "pds" },
+      { id: "nhs111", label: "NHS 111", userType: "pds" },
+      { id: "self_care", label: "Self Care", userType: "pds" },
+      { id: "gp_referral", label: "GP Referral", userType: "non_pds" },
+      { id: "immediate_action", label: "Immediate Action", userType: "non_pds" },
+    ],
+  },
+  // Weight Management and Cholera Vaccination outcome-testing entries
+  // removed per explicit request -- the outcomes dropdown/icon no longer
+  // shows for either condition (only Shingles has it now).
+];
+
+function getConditionOutcomes(slug) {
+  if (!slug) return null;
+  const lower = slug.toLowerCase();
+  return (
+    CONDITION_OUTCOMES.find((c) => lower.includes(c.slug) || c.slug.includes(lower)) ||
+    null
+  );
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function readTestData() {
@@ -219,6 +249,15 @@ function readTestData() {
 
   const get = (key) => {
     const m = src.match(new RegExp(`${key}:\\s*"([^"]+)"`));
+    return m ? m[1] : "";
+  };
+  // For the "export const NAME: Type = (process.env.NAME as Type) ||
+  // (\"value\" as Type);" shape used by QUESTIONNAIRE_FILL_MODE and
+  // PDS_USER_MODE — `get()` above requires a quote immediately after the
+  // colon, which never matches here (a type annotation sits in between), so
+  // it silently always returned "" for these two.
+  const getEnvOverridableConst = (key) => {
+    const m = src.match(new RegExp(`${key}[\\s\\S]*?\\|\\|\\s*\\(\\s*"([^"]+)"`));
     return m ? m[1] : "";
   };
   const getNum = (key) => {
@@ -258,8 +297,9 @@ function readTestData() {
     },
     condition: { journeyType },
     questionnaire: {
-      fillMode: get("QUESTIONNAIRE_FILL_MODE") || "fill-all",
+      fillMode: getEnvOverridableConst("QUESTIONNAIRE_FILL_MODE") || "fill-all",
     },
+    pdsUserMode: getEnvOverridableConst("PDS_USER_MODE") || "non_pds",
     booking: {
       appointmentType: get("appointmentType"),
       useNextAvailableSlot: getBool("useNextAvailableSlot"),
@@ -280,6 +320,15 @@ function writeTestData(data) {
 
   const setStr = (key, val) => {
     src = src.replace(new RegExp(`(${key}:\\s*)"[^"]*"`), `$1"${val}"`);
+  };
+  // Counterpart to getEnvOverridableConst() above — same shape mismatch
+  // meant this never actually wrote QUESTIONNAIRE_FILL_MODE/PDS_USER_MODE
+  // to the file; the toggle looked like it saved but silently did nothing.
+  const setEnvOverridableConst = (key, val) => {
+    src = src.replace(
+      new RegExp(`(${key}[\\s\\S]*?\\|\\|\\s*\\(\\s*)"[^"]*"`),
+      `$1"${val}"`,
+    );
   };
   const setBool = (key, val) => {
     src = src.replace(
@@ -310,7 +359,8 @@ function writeTestData(data) {
   src = src.replace(/(display:\s*)"[^"]*"/, `$1"${display}"`);
 
   const q = data.questionnaire || {};
-  if (q.fillMode) setStr("QUESTIONNAIRE_FILL_MODE", q.fillMode);
+  if (q.fillMode) setEnvOverridableConst("QUESTIONNAIRE_FILL_MODE", q.fillMode);
+  if (data.pdsUserMode) setEnvOverridableConst("PDS_USER_MODE", data.pdsUserMode);
 
   const b = data.booking;
   setStr("appointmentType", b.appointmentType);
@@ -547,6 +597,16 @@ app.get("/api/flow-configs", (_req, res) => {
   res.json(FLOW_CONFIGS);
 });
 
+app.get("/api/outcome-enabled-slugs", (_req, res) => {
+  res.json({ slugs: CONDITION_OUTCOMES.map((c) => c.slug) });
+});
+
+app.get("/api/condition-outcomes", (req, res) => {
+  const slug = req.query.slug || "";
+  const config = getConditionOutcomes(slug);
+  res.json({ result: config ? config.outcomes : [] });
+});
+
 app.get("/api/pharmacies", (_req, res) => {
   try {
     res.json(readPharmacies());
@@ -600,6 +660,25 @@ app.get("/api/run-tests", (req, res) => {
   }
 
   const envParams = { ...process.env };
+  // Dashboard renders the Q&A comparison as a real HTML table (see
+  // renderQaTable in index.html) — the spec's own ASCII-art version of the
+  // same data is redundant here and only wanted for plain CLI runs.
+  envParams.RUN_VIA_DASHBOARD = "1";
+  if (req.query.outcome) {
+    envParams.OUTCOME_ID = req.query.outcome;
+  }
+  // Belt-and-braces: pass the Test Data toggles as env vars too (highest
+  // precedence in test-data.ts's own `process.env.X || "default"` check),
+  // so the run is correct even independent of the file-persisted value.
+  try {
+    const current = readTestData();
+    if (current.questionnaire?.fillMode) {
+      envParams.QUESTIONNAIRE_FILL_MODE = current.questionnaire.fillMode;
+    }
+    if (current.pdsUserMode) {
+      envParams.PDS_USER_MODE = current.pdsUserMode;
+    }
+  } catch (_) {}
   if (req.query.slug) {
     envParams.CONDITION_SLUG = req.query.slug;
     envParams.CONDITION_LABEL = req.query.label || req.query.slug;
@@ -621,7 +700,18 @@ app.get("/api/run-tests", (req, res) => {
     const text = chunk.toString();
     stdout += text;
     text.split("\n").forEach((line) => {
-      if (line.trim()) send("log", line);
+      if (!line.trim()) return;
+      // The raw tagged JSON line is for parsing only — sent as its own
+      // structured event (rendered as a real table client-side) instead of
+      // dumped as a wall of JSON text in the Output panel.
+      const qaMatch = line.match(/^📋 QA_COMPARISON: (.+)$/);
+      if (qaMatch) {
+        try {
+          send("qa_table", JSON.parse(qaMatch[1]));
+        } catch (_) {}
+        return;
+      }
+      send("log", line);
     });
   });
 
@@ -651,7 +741,21 @@ app.get("/api/run-tests", (req, res) => {
       }
     }
 
-    send("done", { code, passed, failed, skipped, success: code === 0, artifacts });
+    // Outcome-specific runs (OUTCOME_ID set): the pass/fail verdict is
+    // "did the expected outcome screen appear", logged mid-run as a tagged
+    // line — re-print it last so it survives past Playwright's own noise,
+    // same as the incomplete-journey reason above.
+    let outcomeResult = null;
+    const outcomeMatch = stdout.match(/🎯 OUTCOME_RESULT: (.+)/);
+    if (outcomeMatch) {
+      try { outcomeResult = JSON.parse(outcomeMatch[1]); } catch (_) {}
+      send(
+        "log",
+        `\n🎯 Outcome check — expected "${outcomeResult?.expected}", got "${outcomeResult?.actual}" — ${outcomeResult?.passed ? "✅ PASSED" : "❌ FAILED"}`,
+      );
+    }
+
+    send("done", { code, passed, failed, skipped, success: code === 0, artifacts, outcomeResult });
     res.end();
   });
 

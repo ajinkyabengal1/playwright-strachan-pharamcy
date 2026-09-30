@@ -1,15 +1,15 @@
 export const TEST_USER = {
   gender: "male" as "male" | "female",
   dob: {
-    day: "17",
+    day: "15",
     month: "04",
     year: "1962",
     /** ISO format used by Ant Design DatePicker */
-    iso: "1962-04-17",
+    iso: "1962-04-15",
     /** Display format: DD/MM/YYYY */
-    display: "17/04/1962",
+    display: "15/04/1962",
   },
-  firstName: "mikes",
+  firstName: "Lloyds",
   lastName: "PEENEY",
   postcode: "HD59LT",
   genderValue: "male",
@@ -21,6 +21,51 @@ export const TEST_USER = {
 };
 
 /**
+ * A seeded identity that DOES resolve to a real NHS/PDS record on this
+ * tenant's mock backend (Kepple Lane confirmed). Everything except
+ * firstName/dob.day matches TEST_USER — those two are the only fields that
+ * actually differ from a real PDS record, which is why TEST_USER itself has
+ * always fallen through to "no matching NHS record found" on every
+ * condition tested so far, NHS-labeled or not.
+ */
+export const TEST_USER_PDS = {
+  ...TEST_USER,
+  dob: {
+    day: "15",
+    month: "04",
+    year: "1962",
+    iso: "1962-04-15",
+    display: "15/04/1962",
+  },
+  firstName: "Lloyd",
+};
+
+/**
+ * ROOT CAUSE FIX (confirmed live -- an "immediate_action"/"gp_referral" run
+ * was rendering the PDS-matched radio-based questionnaire flow instead of
+ * the non-PDS checkbox-based flow those outcomes' rules actually target):
+ * TEST_USER_NON_PDS used to just be `TEST_USER` as-is, on the assumption
+ * that TEST_USER's own firstName/dob.day didn't match the seeded PDS
+ * record. At some point TEST_USER's own firstName/dob were edited to
+ * "Lloyd"/"15/04/1962" -- the EXACT values TEST_USER_PDS above seeds as the
+ * matching record -- so TEST_USER_NON_PDS silently became identical to
+ * TEST_USER_PDS, and a "non_pds" run started resolving to a real NHS/PDS
+ * record too. Override firstName/dob.day here to genuinely different
+ * values so this identity actually fails the PDS lookup again.
+ */
+export const TEST_USER_NON_PDS = {
+  ...TEST_USER,
+  dob: {
+    day: "22",
+    month: "04",
+    year: "1962",
+    iso: "1962-04-22",
+    display: "22/04/1962",
+  },
+  firstName: "Zach",
+};
+
+/**
  * "fill-all": fill every question, required or not (existing default behavior).
  * "required-only": skip questions without the "*" required marker, leave them blank.
  */
@@ -29,6 +74,17 @@ export type QuestionnaireFillMode = "fill-all" | "required-only";
 export const QUESTIONNAIRE_FILL_MODE: QuestionnaireFillMode =
   (process.env.QUESTIONNAIRE_FILL_MODE as QuestionnaireFillMode) ||
   ("fill-all" as QuestionnaireFillMode);
+
+/**
+ * Which signup identity a direct (non-outcome-specific) test run uses —
+ * "pds" resolves to a real NHS record (TEST_USER_PDS), "non_pds" doesn't
+ * (TEST_USER_NON_PDS). An outcome-specific run (OUTCOME_ID set) ignores this
+ * and uses whatever userType that outcome's own config requires instead.
+ */
+export type PdsUserMode = "pds" | "non_pds";
+
+export const PDS_USER_MODE: PdsUserMode =
+  (process.env.PDS_USER_MODE as PdsUserMode) || ("non_pds" as PdsUserMode);
 
 export type ConditionJourneyType = "nhs" | "private" | "lifestyle";
 
@@ -43,9 +99,9 @@ export const CONDITION_CATALOG: Record<ConditionJourneyType, string> = {
  * Keep only one active line uncommented.
  */
 export const ACTIVE_CONDITION = {
-  // journeyType: "nhs" as ConditionJourneyType,
+  journeyType: "nhs" as ConditionJourneyType,
   // journeyType: "private" as ConditionJourneyType,
-  journeyType: "lifestyle" as ConditionJourneyType,
+  // journeyType: "lifestyle" as ConditionJourneyType,
 };
 
 export function getActiveConditionName(): string {
