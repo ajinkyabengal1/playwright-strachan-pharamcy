@@ -9,7 +9,7 @@ export const TEST_USER = {
     /** Display format: DD/MM/YYYY */
     display: "15/04/1962",
   },
-  firstName: "Lloyds",
+  firstName: "Peter",
   lastName: "PEENEY",
   postcode: "HD59LT",
   genderValue: "male",

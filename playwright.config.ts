@@ -23,6 +23,13 @@ const projects = ciBaseURL
 
 export default defineConfig({
   testDir: "./tests/e2e",
+  // Playwright wipes its output directory at the start of every run.
+  // The dashboard scopes each run with --output=test-results/run-<ts>,
+  // but a plain `npm test` uses the default ("test-results") and so
+  // deletes the artifacts of a dashboard run that is still in flight --
+  // that is where the "ENOENT ... .playwright-artifacts-0/traces/*" and
+  // missing-trace.zip errors come from. Give CLI runs their own folder.
+  outputDir: "./test-results/cli",
   timeout: 300_000, // 5 min — sign-up Confirm can take up to 60 s per attempt
   expect: { timeout: 15_000 },
   fullyParallel: false,

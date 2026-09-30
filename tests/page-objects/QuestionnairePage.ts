@@ -76,6 +76,22 @@ export class QuestionnairePage {
   reachedOutcome: { id: string; label: string } | null = null;
 
   /**
+   * Clears per-pass state so the questionnaire can be answered a second
+   * time from scratch -- used when a terminal outcome screen (e.g. Self
+   * Care, which only offers "End assessment") ended the first pass and the
+   * spec restarts the condition to carry on through the rest of the
+   * journey. Recorded answers are kept (latest answer per question wins).
+   */
+  resetForRestart() {
+    this.answeredRuleKeys.clear();
+    this.stuckSelectAttempts.clear();
+    this.stuckPickerAttempts.clear();
+    this.usedGenericSelectValues.clear();
+    this.endedWithoutBooking = false;
+    this.reachedOutcome = null;
+  }
+
+  /**
    * Every question this automation answered, in the order answered — used
    * to compare "what we filled" against "what the submit_questionnaire API
    * call actually sent" (see condition-flow.spec.ts's buildQaComparison()).
@@ -471,33 +487,27 @@ export class QuestionnairePage {
     customScope?: ReturnType<Page["locator"]>,
   ): Promise<boolean> {
     const scope = this.resolveScope(customScope);
-    const selectedInput = scope.locator(
-      [
-        `label:has-text("${labelText}") input[type="radio"]`,
-        `input[type="radio"][value="${labelText}"]`,
-        `input[type="radio"][aria-label="${labelText}"]`,
-      ].join(", "),
-    );
-    const inputCount = await selectedInput.count().catch(() => 0);
-    for (let i = 0; i < inputCount; i++) {
-      const input = selectedInput.nth(i);
-      const visible = await input.isVisible().catch(() => false);
-      if (!visible) continue;
-      const checked = await input
-        .evaluate((el: HTMLInputElement) => el.checked)
-        .catch(() => false);
-      if (checked) return true;
-    }
 
-    const ariaRadio = scope
-      .locator(`[role="radio"]:has-text("${labelText}")`)
-      .first();
-    if (await ariaRadio.count()) {
-      return await ariaRadio
-        .evaluate((el) => el.getAttribute("aria-checked") === "true")
-        .catch(() => false);
-    }
-
+    // ROOT CAUSE (suspected, not yet reproduced live -- matches an observed
+    // Yes-filled/No-submitted mismatch pattern on Weight Management's
+    // eating-disorder radios): when Playwright's own `.check({force:true})`
+    // throws, this class's fallbacks patch the native input directly
+    // (`el.checked = true` + synthetic dispatchEvent calls) rather than
+    // going through a real click. For an AntD Radio.Group, the VISIBLE and
+    // SUBMITTED state is driven by React comparing the group's own value to
+    // each option -- rendered as the "-checked" CSS class below -- not by
+    // the native input's own `.checked` DOM property. A manually-patched
+    // `.checked` can read back `true` here (satisfying the check that used
+    // to run first, below) without AntD's actual React state ever having
+    // changed, if the dispatched events didn't reach whatever handler AntD
+    // actually listens on. React can then silently reconcile the input's
+    // `.checked` back to its real (unchanged) value on its next render --
+    // with no event firing -- and that stale value is what gets submitted,
+    // even though this function already reported success. Check the AntD/
+    // aria signals FIRST: they can only ever reflect the site's own real
+    // state (nothing in this file writes to them directly), whereas the
+    // native `.checked` property is the one signal our own fallback code
+    // can spoof.
     const antWrapper = scope
       .locator(
         [
@@ -514,6 +524,35 @@ export class QuestionnairePage {
             el.classList.contains("ant-radio-button-wrapper-checked"),
         )
         .catch(() => false);
+    }
+
+    const ariaRadio = scope
+      .locator(`[role="radio"]:has-text("${labelText}")`)
+      .first();
+    if (await ariaRadio.count()) {
+      return await ariaRadio
+        .evaluate((el) => el.getAttribute("aria-checked") === "true")
+        .catch(() => false);
+    }
+
+    // Plain (non-AntD, non-aria) radio -- the native property is the only
+    // signal there is, and nothing above spoofs it for this case.
+    const selectedInput = scope.locator(
+      [
+        `label:has-text("${labelText}") input[type="radio"]`,
+        `input[type="radio"][value="${labelText}"]`,
+        `input[type="radio"][aria-label="${labelText}"]`,
+      ].join(", "),
+    );
+    const inputCount = await selectedInput.count().catch(() => 0);
+    for (let i = 0; i < inputCount; i++) {
+      const input = selectedInput.nth(i);
+      const visible = await input.isVisible().catch(() => false);
+      if (!visible) continue;
+      const checked = await input
+        .evaluate((el: HTMLInputElement) => el.checked)
+        .catch(() => false);
+      if (checked) return true;
     }
 
     return false;
@@ -545,14 +584,12 @@ export class QuestionnairePage {
       try {
         await radioInput.check({ force: true });
       } catch {
-        await radioInput.evaluate((el: HTMLInputElement) => {
-          el.checked = true;
-          el.dispatchEvent(
-            new MouseEvent("click", { bubbles: true, cancelable: true }),
-          );
-          el.dispatchEvent(new Event("change", { bubbles: true }));
-          el.dispatchEvent(new Event("input", { bubbles: true }));
-        });
+        // Real el.click() (not a manual `.checked = true` + synthetic
+        // dispatchEvent patch) -- see isRadioSelectionApplied's comment on
+        // why patching `.checked` directly can look successful here yet
+        // never actually change a React-controlled AntD radio's real
+        // state, which is what silently reverts and gets submitted later.
+        await radioInput.evaluate((el: HTMLInputElement) => el.click());
       }
       await this.page.waitForTimeout(300);
       const checked = await this.isRadioSelectionApplied(labelText, scope);
@@ -799,15 +836,12 @@ export class QuestionnairePage {
       await checkboxInput.scrollIntoViewIfNeeded().catch(() => {});
       const checked = await checkboxInput.isChecked().catch(() => false);
       if (!checked) {
+        // Real el.click() -- same reasoning as the radio fallback above:
+        // a manually-patched `.checked` can read back true (Playwright's
+        // own isChecked() below reads that same native property) without
+        // a React-controlled checkbox's real state ever changing.
         await checkboxInput.check({ force: true }).catch(async () => {
-          await checkboxInput.evaluate((el: HTMLInputElement) => {
-            el.checked = true;
-            el.dispatchEvent(
-              new MouseEvent("click", { bubbles: true, cancelable: true }),
-            );
-            el.dispatchEvent(new Event("change", { bubbles: true }));
-            el.dispatchEvent(new Event("input", { bubbles: true }));
-          });
+          await checkboxInput.evaluate((el: HTMLInputElement) => el.click());
         });
       }
       const finalChecked = await checkboxInput.isChecked().catch(() => false);
@@ -1290,7 +1324,6 @@ export class QuestionnairePage {
     }
 
     const activeCondition = getActiveConditionName().toLowerCase();
-
     // 1. Process rule-based answers
     let handledByConditionRule = await this.answerByConditionRules();
 
@@ -1305,9 +1338,16 @@ export class QuestionnairePage {
     // already ran, but in time for fillAllVisibleQuestions()'s generic
     // fallback to grab it first and answer it wrong. Re-run the rule engine
     // once more so it can override any such default before this pass ends.
-    if (!handledByConditionRule) {
-      handledByConditionRule = await this.answerByConditionRules();
-    }
+    // ROOT CAUSE FIX (confirmed live -- Shingles gateway run answered Q1 via
+    // rule, which revealed Q2/Q3 only AFTER that rule pass -- the guard
+    // here used to only re-run the rule engine when NOTHING matched on the
+    // first pass, so any run where at least one rule fired (nearly every
+    // run) skipped this rescan entirely, leaving the newly-revealed Q2/Q3
+    // to the generic fallback above, which prefers "No"/"None of the
+    // above" answers and wrongly triggered Self Care instead of Gateway.
+    // Always rescan, regardless of what the first pass already answered.
+    handledByConditionRule =
+      (await this.answerByConditionRules()) || handledByConditionRule;
 
     if (handledByConditionRule || handledGenericFields) {
       console.log(
@@ -2105,67 +2145,93 @@ export class QuestionnairePage {
       const needsFill = isEmpty || isIncompleteBp || !(await this.isWithinDeclaredBounds(input));
       if (isVisible && needsFill && (await this.shouldSkipOptional(input))) continue;
       if (isVisible && needsFill) {
-        const questionText = await this.getNearbyQuestionText(input);
-        const placeholder = (await input.getAttribute("placeholder")) || "";
-        const name = (await input.getAttribute("name")) || "";
-        const inputMode = (await input.getAttribute("inputmode")) || "";
-        const hasNumericBounds =
-          (await input.getAttribute("min").catch(() => null)) !== null ||
-          (await input.getAttribute("max").catch(() => null)) !== null;
-        const qTextLower = questionText.toLowerCase();
-        const placeholderLower = placeholder.toLowerCase();
-        const nameLower = name.toLowerCase();
-        // Some tenants render height/weight as a plain `type="text"` field
-        // with `inputmode="decimal"` and min/max attributes rather than a
-        // real number input — filling those with "None" or an out-of-range
-        // guess trips the field's own "Value should be between X and Y"
-        // validation, so route them through the same range-aware picker.
-        const isNumericTextField = inputMode === "decimal" || inputMode === "numeric" || hasNumericBounds;
+        try {
+          const questionText = await this.getNearbyQuestionText(input);
+          // Filling one answer can reveal or hide later questions, so the
+          // element list counted above goes stale mid-loop: `nth(i)` then
+          // points at a node that is no longer in the DOM, and EVERY locator
+          // call on it blocks for the full 15s actionTimeout before throwing,
+          // which aborts the whole run (seen live on Kepple Lane "Personal
+          // Information Gathering", failing on getAttribute("placeholder")).
+          // Re-check after the question-text lookup (the slow step this races
+          // with) and skip the field instead -- fillAllVisibleQuestions()'s
+          // outer pass re-scans and picks up whatever is actually on screen.
+          if (!(await input.isVisible().catch(() => false))) continue;
+          // ROOT CAUSE FIX (confirmed live -- measured 15-16s lost on a
+          // single field): these getAttribute calls have no explicit
+          // timeout, so if the element detaches in the gap right after the
+          // isVisible recheck above (the same re-render race, just a beat
+          // later), whichever one is in flight blocks for the full default
+          // 15s actionTimeout before the try/catch below can even fire. A
+          // present element resolves these in milliseconds regardless, so
+          // a short explicit timeout only speeds up the already-vanishing
+          // case.
+          const attrTimeout = { timeout: 1_500 };
+          const placeholder = (await input.getAttribute("placeholder", attrTimeout).catch(() => "")) || "";
+          const name = (await input.getAttribute("name", attrTimeout).catch(() => "")) || "";
+          const inputMode = (await input.getAttribute("inputmode", attrTimeout).catch(() => "")) || "";
+          const hasNumericBounds =
+            (await input.getAttribute("min", attrTimeout).catch(() => null)) !== null ||
+            (await input.getAttribute("max", attrTimeout).catch(() => null)) !== null;
+          const qTextLower = questionText.toLowerCase();
+          const placeholderLower = placeholder.toLowerCase();
+          const nameLower = name.toLowerCase();
+          // Some tenants render height/weight as a plain `type="text"` field
+          // with `inputmode="decimal"` and min/max attributes rather than a
+          // real number input — filling those with "None" or an out-of-range
+          // guess trips the field's own "Value should be between X and Y"
+          // validation, so route them through the same range-aware picker.
+          const isNumericTextField = inputMode === "decimal" || inputMode === "numeric" || hasNumericBounds;
 
-        // "Patient Information" fields (First/Last name, DOB, Postcode) can
-        // appear as a step inside the same questionnaire dialog — these are
-        // real identity fields, not generic questionnaire text, so they
-        // must use TEST_USER's real data rather than a placeholder answer.
-        const isDobField = qTextLower.includes("date of birth") || qTextLower.includes("dob");
+          // "Patient Information" fields (First/Last name, DOB, Postcode) can
+          // appear as a step inside the same questionnaire dialog — these are
+          // real identity fields, not generic questionnaire text, so they
+          // must use TEST_USER's real data rather than a placeholder answer.
+          const isDobField = qTextLower.includes("date of birth") || qTextLower.includes("dob");
 
-        if (placeholderLower.includes("full name") || qTextLower.includes("full name")) {
-          await input.fill(`${TEST_USER.firstName} ${TEST_USER.lastName}`);
-        } else if (
-          (placeholderLower.includes("first name") || qTextLower.includes("first name")) &&
-          !placeholderLower.includes("last") && !qTextLower.includes("last name")
-        ) {
-          await input.fill(TEST_USER.firstName);
-        } else if (placeholderLower.includes("last name") || qTextLower.includes("last name")) {
-          await input.fill(TEST_USER.lastName);
-        } else if (
-          placeholderLower.includes("postal code") ||
-          placeholderLower.includes("postcode") ||
-          qTextLower.includes("postal code") ||
-          qTextLower.includes("postcode")
-        ) {
-          await input.fill(TEST_USER.postcode);
-        } else if (isDobField) {
-          await input.fill(await this.resolveDobPart(input, placeholder));
-        } else if (/1\s*to\s*10|1-10/i.test(questionText) || /1\s*to\s*10|1-10/i.test(placeholder)) {
-          await input.fill(await this.resolveNumericValue(input, questionText, placeholder, 5));
-        } else if (placeholder.includes("___/___") || placeholder.includes("mmHg") || /blood\s*pressure/i.test(questionText) || /systolic/i.test(questionText)) {
-          await this.fillBloodPressure(input);
-        } else if (nameLower.includes("height") || placeholderLower.includes("height") || qTextLower.includes("height")) {
-          await input.fill(await this.resolveNumericValue(input, questionText, placeholder, 170));
-        } else if (nameLower.includes("weight") || placeholderLower.includes("weight") || qTextLower.includes("weight")) {
-          await input.fill(await this.resolveNumericValue(input, questionText, placeholder, 150));
-        } else if (placeholderLower.includes("occupation") || qTextLower.includes("occupation")) {
-          await input.fill(QUESTIONNAIRE_DEFAULTS.occupation);
-        } else if (isNumericTextField) {
-          await input.fill(await this.resolveNumericValue(input, questionText, placeholder, 150));
-        } else {
-          await input.fill(QUESTIONNAIRE_DEFAULTS.freeTextAnswer);
+          if (placeholderLower.includes("full name") || qTextLower.includes("full name")) {
+            await input.fill(`${TEST_USER.firstName} ${TEST_USER.lastName}`);
+          } else if (
+            (placeholderLower.includes("first name") || qTextLower.includes("first name")) &&
+            !placeholderLower.includes("last") && !qTextLower.includes("last name")
+          ) {
+            await input.fill(TEST_USER.firstName);
+          } else if (placeholderLower.includes("last name") || qTextLower.includes("last name")) {
+            await input.fill(TEST_USER.lastName);
+          } else if (
+            placeholderLower.includes("postal code") ||
+            placeholderLower.includes("postcode") ||
+            qTextLower.includes("postal code") ||
+            qTextLower.includes("postcode")
+          ) {
+            await input.fill(TEST_USER.postcode);
+          } else if (isDobField) {
+            await input.fill(await this.resolveDobPart(input, placeholder));
+          } else if (/1\s*to\s*10|1-10/i.test(questionText) || /1\s*to\s*10|1-10/i.test(placeholder)) {
+            await input.fill(await this.resolveNumericValue(input, questionText, placeholder, 5));
+          } else if (placeholder.includes("___/___") || placeholder.includes("mmHg") || /blood\s*pressure/i.test(questionText) || /systolic/i.test(questionText)) {
+            await this.fillBloodPressure(input);
+          } else if (nameLower.includes("height") || placeholderLower.includes("height") || qTextLower.includes("height")) {
+            await input.fill(await this.resolveNumericValue(input, questionText, placeholder, 170));
+          } else if (nameLower.includes("weight") || placeholderLower.includes("weight") || qTextLower.includes("weight")) {
+            await input.fill(await this.resolveNumericValue(input, questionText, placeholder, 150));
+          } else if (placeholderLower.includes("occupation") || qTextLower.includes("occupation")) {
+            await input.fill(QUESTIONNAIRE_DEFAULTS.occupation);
+          } else if (isNumericTextField) {
+            await input.fill(await this.resolveNumericValue(input, questionText, placeholder, 150));
+          } else {
+            await input.fill(QUESTIONNAIRE_DEFAULTS.freeTextAnswer);
+          }
+          // Read back the actual value rather than re-deriving which branch
+          // fired — correct regardless of which of the many cases above ran.
+          const filledValue = await input.inputValue().catch(() => "");
+          this.recordAnswer(questionText, filledValue);
+          answeredAny = true;
+        } catch {
+          // Same race, later in the body (the fill itself): the field went
+          // away mid-answer. Skip rather than kill the run.
+          console.log("[QuestionnairePage] Field disappeared mid-fill -- skipping (outer pass will re-scan)");
         }
-        // Read back the actual value rather than re-deriving which branch
-        // fired — correct regardless of which of the many cases above ran.
-        const filledValue = await input.inputValue().catch(() => "");
-        this.recordAnswer(questionText, filledValue);
-        answeredAny = true;
       }
     }
 
@@ -2181,45 +2247,66 @@ export class QuestionnairePage {
       const needsFill = isEmpty || !(await this.isWithinDeclaredBounds(input));
       if (isVisible && needsFill && (await this.shouldSkipOptional(input))) continue;
       if (isVisible && needsFill) {
-        const questionText = await this.getNearbyQuestionText(input);
-        const placeholder = (await input.getAttribute("placeholder")) || "";
-        const name = (await input.getAttribute("name") || "").toLowerCase();
-        const placeholderLower = placeholder.toLowerCase();
-        const qTextLower = questionText.toLowerCase();
+        try {
+          const questionText = await this.getNearbyQuestionText(input);
+          // Filling one answer can reveal or hide later questions, so the
+          // element list counted above goes stale mid-loop: `nth(i)` then
+          // points at a node that is no longer in the DOM, and EVERY locator
+          // call on it blocks for the full 15s actionTimeout before throwing,
+          // which aborts the whole run (seen live on Kepple Lane "Personal
+          // Information Gathering", failing on getAttribute("placeholder")).
+          // Re-check after the question-text lookup (the slow step this races
+          // with) and skip the field instead -- fillAllVisibleQuestions()'s
+          // outer pass re-scans and picks up whatever is actually on screen.
+          if (!(await input.isVisible().catch(() => false))) continue;
+          // Same fast-fail fix as the text-field loop above -- an explicit
+          // short timeout so a field that detaches right after the
+          // isVisible recheck fails in ~1.5s instead of the full 15s
+          // default actionTimeout.
+          const attrTimeout = { timeout: 1_500 };
+          const placeholder = (await input.getAttribute("placeholder", attrTimeout).catch(() => "")) || "";
+          const name = (await input.getAttribute("name", attrTimeout).catch(() => "") || "").toLowerCase();
+          const placeholderLower = placeholder.toLowerCase();
+          const qTextLower = questionText.toLowerCase();
 
-        // Split DOB boxes rendered as number inputs (e.g. inputmode="numeric")
-        // must get the real day/month/year, not a numeric-range guess.
-        const isDobField = qTextLower.includes("date of birth") || qTextLower.includes("dob");
-        if (isDobField) {
-          await input.fill(await this.resolveDobPart(input, placeholder));
+          // Split DOB boxes rendered as number inputs (e.g. inputmode="numeric")
+          // must get the real day/month/year, not a numeric-range guess.
+          const isDobField = qTextLower.includes("date of birth") || qTextLower.includes("dob");
+          if (isDobField) {
+            await input.fill(await this.resolveDobPart(input, placeholder));
+            answeredAny = true;
+            continue;
+          }
+
+          // Range hints (min/max attrs, or "between X and/to Y" phrasing like
+          // "Enter Number between 12 to 20") take priority over a fixed
+          // fallback guess, which can fall outside the field's own bounds.
+          //
+          // ROOT CAUSE FIX (confirmed live -- "What's your current age?" was
+          // getting filled with 150): there was no dedicated "age" case here,
+          // so it silently fell through to the generic default of 150 --
+          // which happens to be this same fallback's WEIGHT value. Match
+          // "age" (word-boundary, so it doesn't false-positive on "average"/
+          // "percentage") before the generic default applies.
+          let fallback = 150;
+          if (/1\s*to\s*10|1-10/i.test(questionText) || /1\s*to\s*10|1-10/i.test(placeholder)) {
+            fallback = 5;
+          } else if (name.includes("height") || placeholderLower.includes("height") || qTextLower.includes("height")) {
+            fallback = 170;
+          } else if (name.includes("weight") || placeholderLower.includes("weight") || qTextLower.includes("weight")) {
+            fallback = 150;
+          } else if (/\bage\b/.test(name) || /\bage\b/.test(placeholderLower) || /\bage\b/.test(qTextLower)) {
+            fallback = 40;
+          }
+          const value = await this.resolveNumericValue(input, questionText, placeholder, fallback);
+          await input.fill(value);
+          this.recordAnswer(questionText, value);
           answeredAny = true;
-          continue;
+        } catch {
+          // Same race, later in the body (the fill itself): the field went
+          // away mid-answer. Skip rather than kill the run.
+          console.log("[QuestionnairePage] Field disappeared mid-fill -- skipping (outer pass will re-scan)");
         }
-
-        // Range hints (min/max attrs, or "between X and/to Y" phrasing like
-        // "Enter Number between 12 to 20") take priority over a fixed
-        // fallback guess, which can fall outside the field's own bounds.
-        //
-        // ROOT CAUSE FIX (confirmed live -- "What's your current age?" was
-        // getting filled with 150): there was no dedicated "age" case here,
-        // so it silently fell through to the generic default of 150 --
-        // which happens to be this same fallback's WEIGHT value. Match
-        // "age" (word-boundary, so it doesn't false-positive on "average"/
-        // "percentage") before the generic default applies.
-        let fallback = 150;
-        if (/1\s*to\s*10|1-10/i.test(questionText) || /1\s*to\s*10|1-10/i.test(placeholder)) {
-          fallback = 5;
-        } else if (name.includes("height") || placeholderLower.includes("height") || qTextLower.includes("height")) {
-          fallback = 170;
-        } else if (name.includes("weight") || placeholderLower.includes("weight") || qTextLower.includes("weight")) {
-          fallback = 150;
-        } else if (/\bage\b/.test(name) || /\bage\b/.test(placeholderLower) || /\bage\b/.test(qTextLower)) {
-          fallback = 40;
-        }
-        const value = await this.resolveNumericValue(input, questionText, placeholder, fallback);
-        await input.fill(value);
-        this.recordAnswer(questionText, value);
-        answeredAny = true;
       }
     }
 
@@ -2585,8 +2672,22 @@ export class QuestionnairePage {
             const isDrugSearch = /drug|medication|medicine/i.test(selectKey);
             const searchTerms = isDrugSearch ? ["para", "am", "ibu", "a"] : ["a"];
             for (const term of searchTerms) {
-              await searchInput.fill("").catch(() => {});
-              await searchInput.fill(term).catch(() => {});
+              // ROOT CAUSE FIX (confirmed live -- a plain "select all that
+              // apply" ant-select with NO real search box, e.g. Weight
+              // Management's "Have you attempted any of the following?",
+              // burned ~35s on THIS field alone): AntD renders a hidden,
+              // non-editable combobox `<input>` on every select for
+              // keyboard accessibility, even non-searchable ones -- it
+              // matches this same selector and can pass `.isVisible()`,
+              // but `.fill()` on it is never actionable, so each bare
+              // `.catch(() => {})`-wrapped call below silently ate the
+              // full default 15s actionTimeout before "succeeding" via the
+              // catch (2 calls/term x up to 4 terms = up to 2 minutes).
+              // An explicit short timeout fails those fast without
+              // affecting a real, actually-fillable search box, which
+              // resolves in milliseconds either way.
+              await searchInput.fill("", { timeout: 1_500 }).catch(() => {});
+              await searchInput.fill(term, { timeout: 1_500 }).catch(() => {});
               // Remote lookups (e.g. Pharmacy/GP Surgery/drug search) can
               // take a few seconds to respond — poll instead of guessing a
               // fixed delay, resolving as soon as an option actually mounts.
@@ -2782,7 +2883,6 @@ export class QuestionnairePage {
       const heading = this.getQuestionHeadingForRule(rule.questionPattern);
 
       const visible = await heading.isVisible().catch(() => false);
-
       if (!visible) {
         continue;
       }

@@ -950,9 +950,17 @@ test.describe("Conditions flow", () => {
 
     // ─── Steps 5–N: Dynamic journey loop ─────────────────────────────────
     let journeyStatus: "incomplete" | "completed" = "incomplete";
+    // A terminal outcome screen with only "End assessment" (Self Care, etc.)
+    // leaves the site nowhere to go, so the full journey (patient details →
+    // booking) can only be finished by restarting the condition down the
+    // normal gateway path. The first pass's outcome is what an outcome run
+    // asserts on, so it is stashed here and restored before the final check.
+    let restartedAfterOutcome = false;
+    let firstReachedOutcome: { id: string; label: string } | null = null;
+    const originalOutcomeEnv = process.env.OUTCOME_ID;
 
     await test.step("Complete dynamic journey (questionnaire / signup / booking)", async () => {
-      const MAX_ITERATIONS = 7;
+      const MAX_ITERATIONS = 10; // +3 headroom for one post-outcome restart
       const stepVisits: Record<string, number> = {};
       const MAX_STEP_VISITS = 6;
       let flowCompleted = false;
@@ -1048,6 +1056,34 @@ test.describe("Conditions flow", () => {
             // valid, successful outcome — a pharmacist reviews the answers
             // instead of a booking being made — so count it as completed
             // rather than failing the run for never reaching a booking.
+            if (questionnaire.endedWithoutBooking && !restartedAfterOutcome) {
+              restartedAfterOutcome = true;
+              firstReachedOutcome = questionnaire.reachedOutcome;
+              console.log(
+                `↻ ${firstReachedOutcome?.label ?? "Terminal result screen"} ended the assessment — restarting on the gateway path to complete the full journey`,
+              );
+              process.env.OUTCOME_ID = "gateway";
+              questionnaire.resetForRestart();
+              // Start from a clean session so the site doesn't carry the
+              // first pass's answers/result into the restart -- only the
+              // pharmacy-selection cookie is put back.
+              const restartOrigin = new URL(page.url()).origin;
+              await page.context().clearCookies();
+              if (pharmacySlug) {
+                await page.context().addCookies([
+                  { name: "selected-corporate-id", value: pharmacySlug, url: restartOrigin },
+                ]);
+              }
+              await page.evaluate(() => {
+                try { localStorage.clear(); sessionStorage.clear(); } catch { /* opaque origin */ }
+              }).catch(() => {});
+              await page.goto(conditionHref);
+              await detailPage.waitForDetailPage();
+              await detailPage.clickStartAssessment();
+              await guestContinuePage.continueAsGuestIfVisible();
+              await page.waitForLoadState("domcontentloaded");
+              break;
+            }
             if (questionnaire.endedWithoutBooking) {
               // The journey still completes successfully either way — only
               // the log message differs: a tracked outcome screen (NHS 111,
@@ -1293,6 +1329,13 @@ test.describe("Conditions flow", () => {
 
     // ─── Final assertion ──────────────────────────────────────────────────
     await test.step("Verify journey completion", async () => {
+      if (restartedAfterOutcome) {
+        if (originalOutcomeEnv === undefined) delete process.env.OUTCOME_ID;
+        else process.env.OUTCOME_ID = originalOutcomeEnv;
+        // The second (gateway) pass may have overwritten this; the outcome
+        // under test is the one the first pass actually reached.
+        if (firstReachedOutcome) questionnaire.reachedOutcome = firstReachedOutcome;
+      }
       if (requestedOutcomeId) {
         // Outcome-specific run: success means landing on the SELECTED
         // outcome screen, not just "did a booking complete" — a rejection

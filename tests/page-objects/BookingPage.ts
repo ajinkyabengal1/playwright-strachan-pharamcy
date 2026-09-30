@@ -386,6 +386,7 @@ export class BookingPage {
    */
   async selectAvailableSlot(
     prefs: BookingPreferences = BOOKING_PREFERENCES,
+    skipEnabled = 0,
   ): Promise<boolean> {
     const oldSlotGroup = this.page.locator(".rota-slot");
     const newSlotGroup = this.page.locator('h3:has-text("Select a Time") + div');
@@ -450,6 +451,10 @@ export class BookingPage {
     console.log(
       "[BookingPage] No specific preferred time requested or fallback enabled — picking first available",
     );
+    // skipEnabled lets the already-booked retry walk down the day's slots
+    // (0 = first enabled, 1 = second enabled, ...) instead of re-picking
+    // the same first slot every time.
+    let enabledSeen = 0;
     for (let i = 0; i < count; i++) {
       const slot = slotLabels.nth(i);
       const isDisabled = await slot
@@ -464,6 +469,7 @@ export class BookingPage {
         const timeText = ((await slot.textContent().catch(() => "")) ?? "").trim();
         // Skip empty labels that might be matched by the broader locator
         if (timeText) {
+          if (enabledSeen++ < skipEnabled) continue;
           console.log(
             `[BookingPage] Selecting first available slot: ${timeText}`,
           );
@@ -960,61 +966,78 @@ export class BookingPage {
     await this.handleBookingContinue();
   }
 
+  private async isSlotAlreadyBooked(): Promise<boolean> {
+    return this.page
+      .locator(':text("Appointment slot is booked already"), :text("slot is already booked"), :text("no longer available")')
+      .first()
+      .isVisible({ timeout: 800 })
+      .catch(() => false);
+  }
+
+  /** Clicks the Nth enabled calendar date cell; false if there is none. */
+  private async clickEnabledDateCell(index: number): Promise<boolean> {
+    return this.page.evaluate((idx): boolean => {
+      const dateCells = (
+        Array.from(document.querySelectorAll("button")) as HTMLButtonElement[]
+      ).filter((btn) => {
+        if (btn.disabled || btn.getAttribute("aria-disabled") === "true") return false;
+        return btn.children.length >= 2 && !!btn.textContent && btn.textContent.length < 15;
+      });
+      if (idx >= dateCells.length) return false;
+      dateCells[idx].click();
+      return true;
+    }, index);
+  }
+
   /**
-   * Repeated test runs against the same local backend can exhaust the
-   * "soonest available" slot — a previous run already booked it, so the
-   * site shows "Appointment slot is booked already" and disables Continue
-   * indefinitely. Detect that and pick a different day's slot instead of
-   * getting stuck retrying the same unavailable one.
+   * Repeated test runs against the same local backend exhaust slots -- a
+   * previous run already booked one, so the site shows "Appointment slot is
+   * booked already" and disables Continue indefinitely. Walk the calendar
+   * until one sticks: on each date try every enabled time slot in order
+   * (next slot first), and only when that day is exhausted move to the next
+   * date and start again from its first slot.
    */
   private async retryWithDifferentSlotIfAlreadyBooked(
     prefs: BookingPreferences,
   ): Promise<void> {
-    const alreadyBookedVisible = await this.page
-      .locator(':text("Appointment slot is booked already"), :text("slot is already booked"), :text("no longer available")')
-      .first()
-      .isVisible({ timeout: 500 })
-      .catch(() => false);
-    if (!alreadyBookedVisible) return;
+    if (!(await this.isSlotAlreadyBooked())) return;
 
     console.log(
-      "[BookingPage] Soonest slot is already booked (from an earlier test run) — picking a different date instead",
+      "[BookingPage] Selected slot is already booked (from an earlier test run) — trying other slots, then other dates",
     );
 
-    // Skip the first enabled date cell — it's the same day as the
-    // already-booked quick-pick slot — and click the next enabled one.
-    const clicked = await this.page.evaluate((): boolean => {
-      const allButtons = Array.from(
-        document.querySelectorAll("button"),
-      ) as HTMLButtonElement[];
-      const dateCells = allButtons.filter((btn) => {
-        const disabled =
-          btn.disabled || btn.getAttribute("aria-disabled") === "true";
-        if (disabled) return false;
-        return (
-          btn.children.length >= 2 &&
-          btn.textContent &&
-          btn.textContent.length < 15
-        );
-      });
-      if (dateCells.length < 2) return false;
-      dateCells[1].click();
-      return true;
-    });
+    const MAX_DATES = 3;
+    const MAX_SLOTS_PER_DATE = 3;
+    // A fixed preferredTime would just re-pick the same booked slot.
+    const anySlot: BookingPreferences = { ...prefs, preferredTime: undefined, useNextAvailableSlot: true };
 
-    if (!clicked) {
-      console.log(
-        "[BookingPage] No alternate date cell found to retry with",
-      );
-      return;
+    for (let dateIdx = 0; dateIdx < MAX_DATES; dateIdx++) {
+      // Date 0 is the soonest day the quick-pick already landed on; only
+      // click its cell when no time list is showing (quick-pick hides it).
+      const slotListShowing = await this.page
+        .locator('.rota-slot, h3:has-text("Select a Time") + div')
+        .first()
+        .isVisible({ timeout: 500 })
+        .catch(() => false);
+      if (dateIdx > 0 || !slotListShowing) {
+        if (!(await this.clickEnabledDateCell(dateIdx))) {
+          console.log(`[BookingPage] No date cell #${dateIdx} to try -- out of dates`);
+          break;
+        }
+        await this.page.waitForTimeout(1200);
+      }
+
+      for (let slotIdx = 0; slotIdx < MAX_SLOTS_PER_DATE; slotIdx++) {
+        if (!(await this.selectAvailableSlot(anySlot, slotIdx))) break; // day exhausted
+        await this.page.waitForTimeout(500);
+        if (!(await this.isSlotAlreadyBooked())) {
+          console.log(`[BookingPage] Free slot found (date #${dateIdx}, slot #${slotIdx})`);
+          return;
+        }
+        console.log(`[BookingPage] Date #${dateIdx} slot #${slotIdx} also booked -- trying next`);
+      }
     }
 
-    await this.page.waitForTimeout(1200);
-    const slotSelected = await this.selectAvailableSlot(prefs);
-    if (!slotSelected) {
-      console.log(
-        "[BookingPage] No available time slot found on the alternate date",
-      );
-    }
+    throw new Error("Every available slot on the tried dates is already booked");
   }
 }
