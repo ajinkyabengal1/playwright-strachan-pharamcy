@@ -1239,9 +1239,35 @@ test.describe("Conditions flow", () => {
               questionnaireSubmissions.length = 0;
               await page.goto(conditionHref);
               await detailPage.waitForDetailPage();
-              await detailPage.clickStartAssessment();
-              await guestContinuePage.continueAsGuestIfVisible();
-              await page.waitForLoadState("domcontentloaded");
+              // ROOT CAUSE FIX (confirmed live -- GP Referral's journey
+              // order is "Patient Information → Questionnaire → Booking",
+              // the REVERSE of self_care/immediate_action's "Questionnaire
+              // → Patient Information → Booking": by the time THIS
+              // restart fires, signup/patient-info already completed in
+              // an earlier iteration, and removing the cookie-clearing
+              // fix above means that session state now survives the
+              // reload too -- so the site skips straight back to
+              // whatever step an already-signed-up user resumes at
+              // instead of showing "Start Assessment" again, and the old
+              // unconditional clickStartAssessment() call threw
+              // "'Start Assessment' button not visible after 30s." Mirror
+              // the SAME already-on-a-step check "Click Start Assessment"
+              // itself uses on the test's first visit, instead of
+              // assuming a fresh detail page every time.
+              const stepAfterRestart = await detectCurrentStep(page);
+              if (stepAfterRestart === "unknown") {
+                await detailPage.clickStartAssessment();
+                await guestContinuePage.continueAsGuestIfVisible();
+                await page.waitForLoadState("domcontentloaded");
+              } else {
+                // Any other recognized step (sign_up, guest_continue, etc.)
+                // means the reload resumed the user's session mid-journey —
+                // there's no "Start Assessment" button on that screen. Let
+                // the outer loop's own switch(step) handle it next iteration.
+                console.log(
+                  `ℹ Already on step "${stepAfterRestart}" after restart — skipping Click Start Assessment`,
+                );
+              }
               break;
             }
             if (questionnaire.endedWithoutBooking) {

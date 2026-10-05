@@ -253,6 +253,76 @@ function getConditionOutcomes(slug) {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+// Isolates one `export const NAME = { ... }` object's source text via brace
+// counting, so field lookups below never accidentally match a same-named key
+// in a different block (e.g. TEST_USER_PDS also has a "firstName").
+function getNamedObjectBlock(src, constName) {
+  const m = src.match(new RegExp(`${constName}\\b\\s*=\\s*\\{`));
+  if (!m) return null;
+  const start = m.index + m[0].length - 1;
+  let depth = 0;
+  for (let j = start; j < src.length; j++) {
+    if (src[j] === "{") depth++;
+    else if (src[j] === "}") {
+      depth--;
+      if (depth === 0) return { start, end: j + 1, text: src.slice(start, j + 1) };
+    }
+  }
+  return null;
+}
+
+function readUser(src) {
+  const block = getNamedObjectBlock(src, "TEST_USER");
+  if (!block) return {};
+  const t = block.text;
+  const get = (key) => {
+    const m = t.match(new RegExp(`${key}:\\s*"([^"]+)"`));
+    return m ? m[1] : "";
+  };
+  return {
+    firstName: get("firstName"),
+    lastName: get("lastName"),
+    email: get("email"),
+    phone: get("phone"),
+    postcode: get("postcode"),
+    gender: get("gender"),
+    guardianName: get("guardianName"),
+    dobDay: get("day"),
+    dobMonth: get("month"),
+    dobYear: get("year"),
+  };
+}
+
+function writeUser(src, u) {
+  const block = getNamedObjectBlock(src, "TEST_USER");
+  if (!block) return src;
+  let t = block.text;
+  const setStr = (key, val) => {
+    t = t.replace(new RegExp(`(${key}:\\s*)"[^"]*"`), `$1"${val}"`);
+  };
+  if (u.firstName != null) setStr("firstName", u.firstName);
+  if (u.lastName != null) setStr("lastName", u.lastName);
+  if (u.email != null) setStr("email", u.email);
+  if (u.phone != null) setStr("phone", u.phone);
+  if (u.postcode != null) setStr("postcode", u.postcode);
+  if (u.gender != null) setStr("gender", u.gender);
+  if (u.guardianName != null) setStr("guardianName", u.guardianName);
+
+  const day = u.dobDay ?? "";
+  const month = u.dobMonth ?? "";
+  const year = u.dobYear ?? "";
+  if (day) setStr("day", day);
+  if (month) setStr("month", month);
+  if (year) setStr("year", year);
+  // Keep iso/display in sync — SignupPage reads these directly, not day/month/year.
+  if (day && month && year) {
+    setStr("iso", `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`);
+    setStr("display", `${day.padStart(2, "0")}/${month.padStart(2, "0")}/${year}`);
+  }
+
+  return src.slice(0, block.start) + t + src.slice(block.end);
+}
+
 function readTestData() {
   const src = fs.readFileSync(TEST_DATA_PATH, "utf8");
 
@@ -292,11 +362,11 @@ function readTestData() {
   }
 
   return {
-    // Two independent, fully-editable identities (see TEST_USER_PDS /
-    // TEST_USER_NON_PDS in test-data.ts) -- which one a run actually uses
-    // is picked by pdsUserMode below, not by editing a single shared user.
-    pdsUser: readUserProfile(src, "TEST_USER_PDS"),
-    nonPdsUser: readUserProfile(src, "TEST_USER_NON_PDS"),
+    // Single shared identity (TEST_USER) -- pdsUserMode below picks whether
+    // a run resolves it against the seeded PDS record or not (see
+    // TEST_USER_PDS / TEST_USER_NON_PDS in test-data.ts), it does not select
+    // between two separately-edited profiles.
+    user: readUser(src),
     condition: { journeyType },
     questionnaire: {
       fillMode: getEnvOverridableConst("QUESTIONNAIRE_FILL_MODE") || "fill-all",
@@ -342,8 +412,7 @@ function writeTestData(data) {
     src = src.replace(new RegExp(`(${key}:\\s*)\\d+`), `$1${val}`);
   };
 
-  if (data.pdsUser) src = writeUserProfile(src, "TEST_USER_PDS", data.pdsUser);
-  if (data.nonPdsUser) src = writeUserProfile(src, "TEST_USER_NON_PDS", data.nonPdsUser);
+  if (data.user) src = writeUser(src, data.user);
 
   const q = data.questionnaire || {};
   if (q.fillMode) setEnvOverridableConst("QUESTIONNAIRE_FILL_MODE", q.fillMode);
