@@ -21,15 +21,20 @@ export const TEST_USER = {
 };
 
 /**
- * A seeded identity that DOES resolve to a real NHS/PDS record on this
- * tenant's mock backend (Kepple Lane confirmed). Everything except
- * firstName/dob.day matches TEST_USER — those two are the only fields that
- * actually differ from a real PDS record, which is why TEST_USER itself has
- * always fallen through to "no matching NHS record found" on every
- * condition tested so far, NHS-labeled or not.
+ * The seeded identity that DOES resolve to a real NHS/PDS record on this
+ * tenant's mock backend (Kepple Lane confirmed).
+ *
+ * ponytail: every identity field here is a static literal, not spread from
+ * TEST_USER, because the dashboard lets the user edit TEST_USER freely --
+ * without pinning, an edit would silently break the PDS match the same way
+ * it once did for firstName/dob (see commit 4a61ff7). guardianName/
+ * password/confirmPassword aren't part of the PDS match, so those still
+ * come from TEST_USER. If the Kepple Lane seed record ever changes, update
+ * the literals here.
  */
 export const TEST_USER_PDS = {
   ...TEST_USER,
+  gender: "male" as "male" | "female",
   dob: {
     day: "15",
     month: "04",
@@ -38,6 +43,11 @@ export const TEST_USER_PDS = {
     display: "15/04/1962",
   },
   firstName: "Lloyd",
+  lastName: "PEENEY",
+  postcode: "HD59LT",
+  genderValue: "male",
+  email: "lloyd.p2@yopmail.com",
+  phone: "447467059973",
 };
 
 /**
@@ -50,19 +60,33 @@ export const TEST_USER_PDS = {
  * "Lloyd"/"15/04/1962" -- the EXACT values TEST_USER_PDS above seeds as the
  * matching record -- so TEST_USER_NON_PDS silently became identical to
  * TEST_USER_PDS, and a "non_pds" run started resolving to a real NHS/PDS
- * record too. Override firstName/dob.day here to genuinely different
- * values so this identity actually fails the PDS lookup again.
+ * record too. dob.day is derived from TEST_USER's own day (shifted by one,
+ * wrapping at 28) instead of a hardcoded literal, so it always differs from
+ * the PDS seed's day="15" no matter what the dashboard saves into
+ * TEST_USER -- no magic number to fall out of sync again. firstName is
+ * deliberately NOT overridden here (unlike TEST_USER_PDS, which must pin an
+ * exact match), so editing the dashboard's User Info name actually reaches
+ * non-PDS outcome runs.
  */
+const NON_PDS_DOB_DAY = (() => {
+  let n = (parseInt(TEST_USER.dob.day, 10) % 28) + 1;
+  // Skip over the PDS seed's own day (see TEST_USER_PDS above) in the rare
+  // case the +1 wrap lands exactly on it -- referenced directly, not
+  // duplicated as a second "15" literal, so it can't drift out of sync.
+  if (String(n).padStart(2, "0") === TEST_USER_PDS.dob.day) {
+    n = (n % 28) + 1;
+  }
+  return String(n).padStart(2, "0");
+})();
+
 export const TEST_USER_NON_PDS = {
   ...TEST_USER,
   dob: {
-    day: "22",
-    month: "04",
-    year: "1962",
-    iso: "1962-04-22",
-    display: "22/04/1962",
+    ...TEST_USER.dob,
+    day: NON_PDS_DOB_DAY,
+    iso: `${TEST_USER.dob.year}-${TEST_USER.dob.month}-${NON_PDS_DOB_DAY}`,
+    display: `${NON_PDS_DOB_DAY}/${TEST_USER.dob.month}/${TEST_USER.dob.year}`,
   },
-  firstName: "Zach",
 };
 
 /**
@@ -161,7 +185,7 @@ export const BOOKING_PREFERENCES: BookingPreferences = {
 
   useNextAvailableSlot: true,
 
-  preferredMonth: "May 2026",
+  preferredMonth: "",
 
   preferredDate: "9 May",
 
