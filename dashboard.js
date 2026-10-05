@@ -228,9 +228,18 @@ const CONDITION_OUTCOMES = [
       { id: "immediate_action", label: "Immediate Action", userType: "non_pds" },
     ],
   },
-  // Weight Management and Cholera Vaccination outcome-testing entries
-  // removed per explicit request -- the outcomes dropdown/icon no longer
-  // shows for either condition (only Shingles has it now).
+  // Weight Management outcome-testing entry removed per earlier explicit
+  // request -- only Shingles and (re-added below) Cholera Vaccination have
+  // one now.
+  {
+    slug: "cholera-vaccination-r-nhs",
+    gateway: "nhs",
+    // Only one outcome -- confirmed live there's no screen distinct from
+    // "Immediate Action" to label "GP Referral" (see outcome-config.ts).
+    outcomes: [
+      { id: "immediate_action", label: "Immediate Action", userType: "non_pds" },
+    ],
+  },
 ];
 
 function getConditionOutcomes(slug) {
@@ -283,18 +292,11 @@ function readTestData() {
   }
 
   return {
-    user: {
-      gender: get("gender"),
-      firstName: get("firstName"),
-      lastName: get("lastName"),
-      postcode: get("postcode"),
-      email: get("email"),
-      phone: get("phone"),
-      guardianName: get("guardianName"),
-      dobDay: get("day"),
-      dobMonth: get("month"),
-      dobYear: get("year"),
-    },
+    // Two independent, fully-editable identities (see TEST_USER_PDS /
+    // TEST_USER_NON_PDS in test-data.ts) -- which one a run actually uses
+    // is picked by pdsUserMode below, not by editing a single shared user.
+    pdsUser: readUserProfile(src, "TEST_USER_PDS"),
+    nonPdsUser: readUserProfile(src, "TEST_USER_NON_PDS"),
     condition: { journeyType },
     questionnaire: {
       fillMode: getEnvOverridableConst("QUESTIONNAIRE_FILL_MODE") || "fill-all",
@@ -340,23 +342,8 @@ function writeTestData(data) {
     src = src.replace(new RegExp(`(${key}:\\s*)\\d+`), `$1${val}`);
   };
 
-  const u = data.user;
-  setStr("gender", u.gender);
-  setStr("firstName", u.firstName);
-  setStr("lastName", u.lastName);
-  setStr("postcode", u.postcode);
-  setStr("email", u.email);
-  setStr("phone", u.phone);
-  setStr("guardianName", u.guardianName);
-  // DOB
-  src = src.replace(/(day:\s*)"[^"]*"/, `$1"${u.dobDay}"`);
-  src = src.replace(/(month:\s*)"[^"]*"/, `$1"${u.dobMonth}"`);
-  src = src.replace(/(year:\s*)"[^"]*"/, `$1"${u.dobYear}"`);
-  // ISO and display derived
-  const iso = `${u.dobYear}-${u.dobMonth.padStart(2, "0")}-${u.dobDay.padStart(2, "0")}`;
-  const display = `${u.dobDay.padStart(2, "0")}/${u.dobMonth.padStart(2, "0")}/${u.dobYear}`;
-  src = src.replace(/(iso:\s*)"[^"]*"/, `$1"${iso}"`);
-  src = src.replace(/(display:\s*)"[^"]*"/, `$1"${display}"`);
+  if (data.pdsUser) src = writeUserProfile(src, "TEST_USER_PDS", data.pdsUser);
+  if (data.nonPdsUser) src = writeUserProfile(src, "TEST_USER_NON_PDS", data.nonPdsUser);
 
   const q = data.questionnaire || {};
   if (q.fillMode) setEnvOverridableConst("QUESTIONNAIRE_FILL_MODE", q.fillMode);

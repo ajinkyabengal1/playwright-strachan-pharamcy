@@ -343,11 +343,23 @@ export const SHINGLES_RULES_SELF_CARE: ConditionQuestionRule[] = [
 ];
 
 /**
- * CONFIRMED live (checkbox-based, non-PDS flow): no red flags at Q1 +
- * "outside antiviral treatment window" at Q2 → the site's own "GP referal"
- * result screen (their spelling — one L): "We're sorry, but you do not meet
- * the criteria for this service. Please contact your GP for further advice
- * and support."
+ * CONFIRMED live (checkbox-based, non-PDS flow, at the time this was
+ * written): no red flags at Q1 + "outside antiviral treatment window" at Q2
+ * → the site's own "GP referal" result screen (their spelling — one L):
+ * "We're sorry, but you do not meet the criteria for this service. Please
+ * contact your GP for further advice and support."
+ *
+ * CURRENTLY UNREACHABLE (confirmed live, this session): every identity
+ * tested now renders the RADIO-based flow instead (see SHINGLES_RULES_*'s
+ * own comments) -- these checkbox rules are a harmless no-op on it. That
+ * flow's Q1/Q2/Q3 are each binary, and exhaustively checking every
+ * combination accounts for exactly 4 outcomes (NHS111 / Self Care / Gateway
+ * / Emergency ["Emergency Action Needed Now", this flow's Immediate
+ * Action]) with nothing left over for a distinct GP Referral screen. This
+ * rule set is kept, unmodified, in case the checkbox flow is ever restored
+ * for some identity -- but gp_referral is not currently a reachable outcome
+ * on Kepple Lane's Shingles condition, and outcome-config.ts's own entry
+ * for it is flagged accordingly.
  */
 export const SHINGLES_RULES_GP_REFERRAL_CHECKBOX: ConditionQuestionRule[] = [
   {
@@ -378,6 +390,29 @@ export const SHINGLES_RULES_IMMEDIATE_ACTION: ConditionQuestionRule[] = [
     answerText:
       "Eye involvement (ophthalmic zoster) - rash on tip of nose or around eye",
     control: "checkbox",
+  },
+  // CONFIRMED LIVE (radio variant, via the submit_questionnaire API
+  // response itself): the site is currently rendering the RADIO-based flow
+  // (not the checkbox one above) for every identity tested this session --
+  // the checkbox rule above never matches, so it's a harmless no-op on the
+  // current flow. Answering "yes" at the urgent-care red-flag question (Q2)
+  // reaches this exact template: "id":1032,"name":"3.0 Shingles - A&E -
+  // Prod", title "Emergency Action Needed Now", color #C52528 -- the
+  // current flow's equivalent of the old checkbox screen above (also
+  // confirmed via exhaustive case analysis: Q1/Q2/Q3 are each binary, and
+  // Q1=No/Q1+Q2=No+Q3=No/Q1+Q2=No+Q3=Yes/Q1+Q2=Yes are the only 4 reachable
+  // buckets -- covering NHS111/Self Care/Gateway/this one respectively,
+  // with NO combination left over for a distinct "GP Referral" screen on
+  // this flow -- see SHINGLES_RULES_GP_REFERRAL_CHECKBOX's own comment).
+  {
+    questionPattern: /Do you have these symptoms\?/i,
+    answerText: "I do have these symptoms",
+    control: "radio",
+  },
+  {
+    questionPattern: SHINGLES_Q1_URGENT_CARE,
+    answerText: "I do have one or more of these symptoms",
+    control: "radio",
   },
 ];
 
@@ -444,6 +479,74 @@ export const WEIGHT_MANAGEMENT_RULES_GP_REFERRAL: ConditionQuestionRule[] = [
   { questionPattern: WEIGHT_MGMT_Q_BELIEVE_OVERWEIGHT, answerText: "No", control: "radio" },
 ];
 
+/**
+ * Cholera Vaccination R (Kepple Lane, slug cholera-vaccination-r-nhs),
+ * added per explicit request: "if you select No in Q2 then it will go to
+ * immediate action, and normal answer will take you to GP Referral" --
+ * confirmed live (DEBUG_QUESTIONS dump) the real Q2 wording and full
+ * question set are:
+ *   Q1 Are you well today?
+ *   Q2 Are you travelling to, living in, or at risk of exposure to cholera?
+ *   Q3 Is this vaccination required solely for occupational purposes?
+ *   Q4 Have you previously received Dukoral (Cholera vaccine)?
+ *   Q5 Do you have any allergies (including vaccine reactions)?
+ *   Q6 Are you currently pregnant or breastfeeding? (Pregnant/Breastfeeding/No)
+ *   Q7 Do you have any medical conditions affecting your immune system or
+ *      overall health? (Yes reveals a conditional "Search and select
+ *      conditions" sub-field -- kept "No" here so neither rule set has to
+ *      also drive that separate ant-select)
+ *   Q9 Do you follow a strict low-sodium diet or have a condition
+ *      requiring sodium restriction?
+ * Q2 is the only question that differs between the two rule sets below --
+ * everything else is pinned to a safe "No" (or "Yes" for Q1) so it can't
+ * accidentally trigger some OTHER exclusion and confuse which answer
+ * actually produced the outcome screen.
+ */
+const CHOLERA_Q_WELL_TODAY = /well today/i;
+const CHOLERA_Q_TRAVEL_RISK =
+  /travelling to, living in, or at risk of exposure to cholera/i;
+const CHOLERA_Q_OCCUPATIONAL = /required solely for occupational purposes/i;
+const CHOLERA_Q_PRIOR_DUKORAL = /previously received Dukoral/i;
+const CHOLERA_Q_ALLERGIES = /any allergies.*vaccine reactions/i;
+const CHOLERA_Q_PREGNANT = /pregnant or breastfeeding/i;
+const CHOLERA_Q_IMMUNE_CONDITIONS =
+  /medical conditions affecting your immune system/i;
+const CHOLERA_Q_LOW_SODIUM = /strict low-sodium diet/i;
+
+const CHOLERA_RULES_COMMON: ConditionQuestionRule[] = [
+  { questionPattern: CHOLERA_Q_WELL_TODAY, answerText: "Yes", control: "radio" },
+  { questionPattern: CHOLERA_Q_OCCUPATIONAL, answerText: "No", control: "radio" },
+  { questionPattern: CHOLERA_Q_PRIOR_DUKORAL, answerText: "No", control: "radio" },
+  { questionPattern: CHOLERA_Q_ALLERGIES, answerText: "No", control: "radio" },
+  { questionPattern: CHOLERA_Q_PREGNANT, answerText: "No", control: "radio" },
+  { questionPattern: CHOLERA_Q_IMMUNE_CONDITIONS, answerText: "No", control: "radio" },
+  { questionPattern: CHOLERA_Q_LOW_SODIUM, answerText: "No", control: "radio" },
+];
+
+/**
+ * ROOT CAUSE (confirmed live via the submit_questionnaire API response
+ * itself -- not a guess): this template's ENTIRE outcome is one formula,
+ * "Q3+Q4" (the site's own fe_id labels for CHOLERA_Q_TRAVEL_RISK and
+ * CHOLERA_Q_OCCUPATIONAL respectively) -- No on travel-risk scores 11,
+ * Yes on occupational-only scores 11, everything else scores 1; 0-10 =
+ * "Patient qualified" (proceeds straight to booking), 11-200 = "Paitnet
+ * doesn't qualified" [sic, site's own typo]. No OTHER question (allergies,
+ * pregnancy, immune conditions, low-sodium diet) affects this outcome at
+ * all, confirmed by testing an allergy=Yes flag on top of a qualifying
+ * answer and still reaching booking success.
+ *
+ * CONFIRMED LIVE: there is only ONE rejection screen ("Result / Paitnet
+ * doesn't qualified / A pharmacist will review your answers and advise on
+ * the next step. / End assessment"). occupational-only=Yes lands on this
+ * same screen too (same formula, same 11+ score), but that's not exposed
+ * as its own outcome id here -- see outcome-config.ts's comment on why a
+ * "gp_referral" entry with an identical detectPattern isn't safe to add.
+ */
+export const CHOLERA_RULES_IMMEDIATE_ACTION: ConditionQuestionRule[] = [
+  { questionPattern: CHOLERA_Q_TRAVEL_RISK, answerText: "No", control: "radio" },
+  ...CHOLERA_RULES_COMMON,
+];
+
 export const OUTCOME_RULES: Record<string, Record<string, ConditionQuestionRule[]>> = {
   "shingles-herpes-zoster-nhs": {
     gateway: SHINGLES_RULES,
@@ -455,5 +558,8 @@ export const OUTCOME_RULES: Record<string, Record<string, ConditionQuestionRule[
   "weight-management-private": {
     gateway: WEIGHT_MANAGEMENT_RULES_GATEWAY,
     gp_referral: WEIGHT_MANAGEMENT_RULES_GP_REFERRAL,
+  },
+  "cholera-vaccination-r-nhs": {
+    immediate_action: CHOLERA_RULES_IMMEDIATE_ACTION,
   },
 };

@@ -30,6 +30,9 @@ const QUESTIONNAIRE_DEFAULTS = {
 export class QuestionnairePage {
   readonly page: Page;
   private readonly MAX_QUESTIONS = 50;
+  // See the "gave up on a required field" fix in fillVisibleQuestionsOnce()
+  // (ant-select handling) for why this is 5, not 2.
+  private readonly MAX_STUCK_SELECT_ATTEMPTS = 5;
   private readonly answeredRuleKeys = new Set<string>();
   private readonly stuckSelectAttempts = new Map<string, number>();
   // ROOT CAUSE FIX ("Personal Information Gathering" burned the entire
@@ -1377,6 +1380,29 @@ export class QuestionnairePage {
       return false;
     }
 
+    // ROOT CAUSE FIX (confirmed live -- every Shingles outcome run
+    // (self_care/gp_referral/immediate_action) kept landing on NHS 111
+    // regardless of which outcome was requested): SHINGLES_RULES already
+    // covers every one of these questions (both checkboxes AND all 3
+    // radios, including "confirm what level of treatment you need"), so
+    // this legacy block below is fully redundant for Shingles now -- and
+    // actively harmful. Its own hardcoded
+    // `selectRadioByText("I do not have these symptoms")` call matches
+    // ANY of the 3 "symptoms"-worded radio groups, not specifically Q1 --
+    // so whenever the RULE engine's own click-and-verify for Q2/Q3 merely
+    // ran slower than its ~1.4s retry budget (observed: the dev server
+    // under sustained load across this session re-rendered AntD's checked
+    // state late), this block ran in the SAME pass as the failed
+    // verification, found that same still-unanswered radio group, and
+    // force-answered it "I do not have these symptoms" -- NHS 111's own
+    // trigger answer -- before the rule engine's next pass ever got a
+    // chance to retry with the correct one. Skip this whole block for
+    // Shingles; the no-progress-streak exit already handles a genuinely
+    // stuck page correctly without needing to guess an answer here.
+    if (activeCondition.includes("shingles")) {
+      return false;
+    }
+
     // ROOT CAUSE FIX (confirmed live -- "All Test Question" hung for the
     // FULL 5-minute test timeout with a required "Please select Drug"
     // remote-search select permanently empty, red "Please select option
@@ -1392,8 +1418,9 @@ export class QuestionnairePage {
     // fail fast (within a few seconds) instead of burning the rest of the
     // test timeout on a lost cause.
     const hasGivenUpOnARequiredField =
-      [...this.stuckSelectAttempts.values()].some((n) => n >= 2) ||
-      [...this.stuckPickerAttempts.values()].some((n) => n >= 2);
+      [...this.stuckSelectAttempts.values()].some(
+        (n) => n >= this.MAX_STUCK_SELECT_ATTEMPTS,
+      ) || [...this.stuckPickerAttempts.values()].some((n) => n >= 2);
     if (hasGivenUpOnARequiredField) {
       console.log(
         "[QuestionnairePage] Already gave up on a required field elsewhere on this page -- skipping the generic radio fallback instead of retrying a lost cause.",
@@ -1960,7 +1987,14 @@ export class QuestionnairePage {
                 await start.evaluate((el: HTMLInputElement) => el.removeAttribute("readonly"));
                 await start.click();
                 await start.fill("");
-                await start.fill("01-05-2026");
+                // Same fix as the single-date picker's manual-typing
+                // fallback below: real per-character keystrokes, not a
+                // single bulk `.fill()`, so AntD's own keystroke-driven
+                // date parser actually commits the value it needs for
+                // the site's real (not just DOM-visible) form validity.
+                await start.pressSequentially("01-05-2026", { delay: 20 }).catch(async () => {
+                  await start.fill("01-05-2026");
+                });
                 await start.press("Enter").catch(() => {});
                 await this.page.keyboard.press("Enter").catch(() => {});
                 answeredAny = true;
@@ -1970,7 +2004,9 @@ export class QuestionnairePage {
                 await end.evaluate((el: HTMLInputElement) => el.removeAttribute("readonly"));
                 await end.click();
                 await end.fill("");
-                await end.fill("15-05-2026");
+                await end.pressSequentially("15-05-2026", { delay: 20 }).catch(async () => {
+                  await end.fill("15-05-2026");
+                });
                 await end.press("Enter").catch(() => {});
                 await this.page.keyboard.press("Enter").catch(() => {});
                 
@@ -2087,7 +2123,22 @@ export class QuestionnairePage {
           await picker.fill("");
           const placeholder = (await picker.getAttribute("placeholder")) || "";
           const dateStr = placeholder.includes("YYYY") ? "1990-01-01" : "01-01-1990";
-          await picker.fill(dateStr);
+          // ROOT CAUSE FIX (suspected, matches a Meadows Pharmacy
+          // "Continue stays disabled forever with every field showing
+          // answered" hang): `.fill()` sets the input's value in one shot
+          // via a single native `input` event -- AntD's DatePicker parses
+          // manually-typed dates through its OWN per-keystroke handler
+          // (it needs partial-input tracking for backspace/separators),
+          // not a generic input event, so `.fill()` can leave the DOM
+          // input showing the typed text (satisfying this file's own
+          // "is it empty" checks and the site's `--answered` CSS class)
+          // while AntD's real internal date value -- what actually gates
+          // the site's own Continue/submit validity -- never gets set.
+          // Real per-character keystrokes go through the same handler a
+          // human's typing would.
+          await picker.pressSequentially(dateStr, { delay: 20 }).catch(async () => {
+            await picker.fill(dateStr); // last-resort fallback
+          });
           await picker.press("Enter").catch(() => {});
           await this.page.keyboard.press("Enter").catch(() => {});
           answeredAny = true;
@@ -2634,7 +2685,17 @@ export class QuestionnairePage {
         }
 
         const priorAttempts = this.stuckSelectAttempts.get(selectKey) ?? 0;
-        if (priorAttempts >= 2) {
+        // ROOT CAUSE FIX (confirmed live -- Cholera Vaccination's "Search
+        // and select conditions:" remote lookup genuinely returned options
+        // and got answered on one attempt, then came back EMPTY again on
+        // the very next pass -- the endpoint itself is flaky/inconsistent
+        // for the exact same search term, not a query-length or event-type
+        // problem this file can fix at the interaction level): a 2-attempt
+        // cap gave a flaky endpoint almost no chance to land on a working
+        // response. Raised to MAX_STUCK_SELECT_ATTEMPTS (5) -- still
+        // bounded, just enough headroom for an unreliable search to
+        // eventually succeed.
+        if (priorAttempts >= this.MAX_STUCK_SELECT_ATTEMPTS) {
           continue;
         }
 
@@ -2670,7 +2731,19 @@ export class QuestionnairePage {
             // drug/medication; everything else keeps the original
             // single-term fast path.
             const isDrugSearch = /drug|medication|medicine/i.test(selectKey);
-            const searchTerms = isDrugSearch ? ["para", "am", "ibu", "a"] : ["a"];
+            // ROOT CAUSE FIX (confirmed live -- Cholera Vaccination's
+            // required "Search and select conditions:" remote lookup, same
+            // failure shape as the drug-search case above: single letter
+            // "a" returns zero results, permanently blocking the field and
+            // hanging the whole test): same fix, scoped to selects whose
+            // own label mentions "condition[s]" -- try a few realistic
+            // medical-condition substrings before falling back to "a".
+            const isConditionSearch = /condition/i.test(selectKey);
+            const searchTerms = isDrugSearch
+              ? ["para", "am", "ibu", "a"]
+              : isConditionSearch
+                ? ["asthma", "diabetes", "hypertension", "a"]
+                : ["a"];
             for (const term of searchTerms) {
               // ROOT CAUSE FIX (confirmed live -- a plain "select all that
               // apply" ant-select with NO real search box, e.g. Weight
@@ -2687,7 +2760,17 @@ export class QuestionnairePage {
               // affecting a real, actually-fillable search box, which
               // resolves in milliseconds either way.
               await searchInput.fill("", { timeout: 1_500 }).catch(() => {});
-              await searchInput.fill(term, { timeout: 1_500 }).catch(() => {});
+              // Real per-character keystrokes, not a bulk `.fill()` -- same
+              // reasoning as the date-picker fix elsewhere in this file:
+              // an AntD remote-search combobox's onSearch is wired to real
+              // typing, and a single bulk `.fill()` firing one synthetic
+              // `input` event doesn't reliably trigger it the same way
+              // (confirmed live -- Cholera Vaccination's "Search and select
+              // conditions:" never returned options via `.fill()` alone,
+              // for any of several realistic condition-name terms).
+              await searchInput.pressSequentially(term, { delay: 30 }).catch(async () => {
+                await searchInput.fill(term, { timeout: 1_500 }).catch(() => {});
+              });
               // Remote lookups (e.g. Pharmacy/GP Surgery/drug search) can
               // take a few seconds to respond — poll instead of guessing a
               // fixed delay, resolving as soon as an option actually mounts.
@@ -2727,7 +2810,7 @@ export class QuestionnairePage {
           answeredAny = true;
         } else {
           console.log(
-            `[QuestionnairePage] No options rendered in time for select "${selectKey}" (attempt ${priorAttempts + 1}); giving up after 2 attempts to avoid retrying forever`,
+            `[QuestionnairePage] No options rendered in time for select "${selectKey}" (attempt ${priorAttempts + 1}/${this.MAX_STUCK_SELECT_ATTEMPTS}); giving up once the cap is reached to avoid retrying forever`,
           );
           this.stuckSelectAttempts.set(selectKey, priorAttempts + 1);
           await this.page.locator("body").click({ force: true }).catch(() => {});
@@ -3413,9 +3496,12 @@ export class QuestionnairePage {
       `[QuestionnairePage] Outcome screen reached: ${this.reachedOutcome.label} — continuing the journey to completion`,
     );
 
+    // Same vanishing-element race as handleSelfCareResult's "End
+    // assessment" click -- short timeouts so a stale button fails fast
+    // instead of eating the full default actionTimeout.
     await popupButton.scrollIntoViewIfNeeded().catch(() => {});
-    await popupButton.click({ force: true }).catch(async () => {
-      await popupButton!.evaluate((el: HTMLElement) => el.click());
+    await popupButton.click({ force: true, timeout: 2_000 }).catch(async () => {
+      await popupButton!.evaluate((el: HTMLElement) => el.click(), { timeout: 2_000 }).catch(() => {});
     });
     await this.page.waitForLoadState("networkidle").catch(() => {});
 
@@ -3471,9 +3557,19 @@ export class QuestionnairePage {
         console.log(
           `[QuestionnairePage] Terminal result screen detected (no private-consultation option): ${this.reachedOutcome.label} — clicking End assessment`,
         );
+        // ROOT CAUSE FIX (confirmed live -- hung the full default
+        // actionTimeout here): this can run right after handleNHS111Popup()
+        // just clicked "Book Private Consultation" on an EARLIER pass --
+        // that click's own SPA navigation can still be mid-flight, so this
+        // "End assessment" button (read as visible a moment ago) can
+        // vanish between the isVisible() check above and the click below.
+        // A bare `.click()`/`.evaluate()` with no explicit timeout then
+        // waits the full 15s default before giving up. Short timeouts so a
+        // vanishing button fails fast instead -- the outer loop re-scans
+        // and correctly picks up whatever page actually loaded next.
         await btn.scrollIntoViewIfNeeded().catch(() => {});
-        await btn.click({ force: true }).catch(async () => {
-          await btn.evaluate((el: HTMLElement) => el.click());
+        await btn.click({ force: true, timeout: 2_000 }).catch(async () => {
+          await btn.evaluate((el: HTMLElement) => el.click(), { timeout: 2_000 }).catch(() => {});
         });
         await this.page.waitForLoadState("networkidle").catch(() => {});
         this.endedWithoutBooking = true;

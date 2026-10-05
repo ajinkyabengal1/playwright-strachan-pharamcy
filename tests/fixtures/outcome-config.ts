@@ -87,33 +87,90 @@ export const CONDITION_OUTCOMES: ConditionOutcomeConfig[] = [
         // checked first in the array, it always won that ambiguous match —
         // a real Immediate Action run was being misreported as GP Referral.
         // Keep only the heading text, which is unique to this screen.
+        //
+        // CURRENTLY UNREACHABLE (confirmed live -- see
+        // SHINGLES_RULES_GP_REFERRAL_CHECKBOX's own comment in
+        // ConditionQuestionnaireRules.ts): every identity renders the
+        // radio-based flow now, not the checkbox one this screen needs,
+        // and that flow's 3 binary questions are exhaustively accounted
+        // for by NHS111/Self Care/Gateway/Immediate Action with nothing
+        // left for this one. Kept (not deleted) in case the checkbox flow
+        // is ever restored. Running OUTCOME_ID=gp_referral right now will
+        // fail -- that's expected and accurate, not a bug to chase.
         id: "gp_referral",
         label: "GP Referral",
         userType: "non_pds",
         detectPatterns: [/gp\s*referr?al/i],
       },
       {
-        // CONFIRMED live (user-provided screenshot): exact heading text is
-        // "Immediate Actions Required" — "We're sorry, but you do not meet
-        // the criteria for this service. Please contact NHS 111 for
-        // further advice and support." Note this screen ALSO mentions
-        // "NHS 111" in its body text, same as the true NHS 111 result — the
-        // nhs111 pattern's tight "Result within 15 chars of NHS 111"
-        // requirement is what keeps the two from colliding (the "Result"
-        // tab label here is nowhere near "NHS 111" in this text). The
-        // original /seek\s+urgent/i and /call\s*999/i patterns were removed
-        // earlier — they matched the site's generic "Safety-netting"
-        // boilerplate present on every condition's page.
+        // Two CONFIRMED-live variants, kept together since the site
+        // appears to have switched flows at some point (see ROOT CAUSE
+        // comment on SHINGLES_RULES_IMMEDIATE_ACTION in
+        // ConditionQuestionnaireRules.ts for the radio-flow trigger):
+        // - OLDER checkbox-flow screenshot: heading "Immediate Actions
+        //   Required" — "...do not meet the criteria for this service.
+        //   Please contact NHS 111 for further advice and support."
+        // - CURRENT radio-flow (confirmed live via the submit_questionnaire
+        //   API response, template "3.0 Shingles - A&E - Prod", color
+        //   #C52528): title "Emergency Action Needed Now" — "...seek urgent
+        //   medical attention...go to the nearest Accident and Emergency
+        //   (A&E) department as soon as possible."
+        // Note the old screen ALSO mentions "NHS 111" in its body text,
+        // same as the true NHS 111 result — the nhs111 pattern's tight
+        // "Result within 15 chars of NHS 111" requirement is what keeps
+        // the two from colliding there. The original /seek\s+urgent/i and
+        // /call\s*999/i patterns were removed earlier — they matched the
+        // site's generic "Safety-netting" boilerplate present on every
+        // condition's page; /emergency action needed now/i is specific to
+        // this one screen instead.
         id: "immediate_action",
         label: "Immediate Action",
         userType: "non_pds",
-        detectPatterns: [/immediate\s+actions?\s+required/i],
+        detectPatterns: [
+          /immediate\s+actions?\s+required/i,
+          /emergency action needed now/i,
+        ],
       },
     ],
   },
-  // Weight Management and Cholera Vaccination outcome-testing entries
-  // removed per explicit request -- the outcomes dropdown/icon no longer
-  // shows for either condition (only Shingles has it now).
+  // Weight Management outcome-testing entry removed per earlier explicit
+  // request -- only Shingles and (re-added below) Cholera Vaccination have
+  // one now.
+  {
+    // Condition ID-478 per request. Q2 ("Are you travelling to, living in,
+    // or at risk of exposure to cholera?") is the deciding question -- see
+    // CHOLERA_RULES_GP_REFERRAL/IMMEDIATE_ACTION in
+    // ConditionQuestionnaireRules.ts for the full answer set and why.
+    // detectPatterns below are placeholders pending live confirmation
+    // (matching this file's own convention elsewhere) -- update once each
+    // outcome's real on-screen text is confirmed.
+    slug: "cholera-vaccination-r-nhs",
+    gateway: "nhs",
+    // CONFIRMED LIVE via the submit_questionnaire API response (this
+    // template's entire outcome is one "Q3+Q4" formula -- see
+    // ConditionQuestionnaireRules.ts's CHOLERA_RULES doc comment) AND via
+    // the actual rendered screen text: travel-risk=No and
+    // occupational-only=Yes both land on the exact same single rejection
+    // screen ("Result / Paitnet doesn't qualified [site's own typo] / A
+    // pharmacist will review your answers and advise on the next step.").
+    // There is no separate "GP Referral" screen distinct from "Immediate
+    // Action" for this condition -- only ONE outcome is listed here
+    // (kept as "immediate_action" per the original request, since that
+    // was the specific No-on-Q2 trigger asked for). A "gp_referral" entry
+    // is deliberately NOT added: with an identical detectPattern it would
+    // always win the array-order match regardless of which outcome was
+    // actually requested, silently breaking assertions for whichever id
+    // wasn't listed first -- a real screen for it would need its own
+    // distinct on-screen text before it can be added safely.
+    outcomes: [
+      {
+        id: "immediate_action",
+        label: "Immediate Action",
+        userType: "non_pds",
+        detectPatterns: [/doesn'?t\s+qualified/i, /pharmacist will review your answers/i],
+      },
+    ],
+  },
 ];
 
 export function getOutcomeConfig(slug: string): ConditionOutcomeConfig | undefined {

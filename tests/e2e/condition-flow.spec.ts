@@ -1,6 +1,5 @@
 import { test, expect, Page } from "@playwright/test";
 import {
-  TEST_USER,
   TEST_USER_PDS,
   TEST_USER_NON_PDS,
   PDS_USER_MODE,
@@ -8,7 +7,8 @@ import {
   CART_PREFERENCES,
   DRUG_SELECTION_PREFERENCES,
   SHIPPING_ADDRESS_PREFERENCES,
-  THANK_YOU_PREFERENCES, PHARMACY_PREFERENCES,
+  THANK_YOU_PREFERENCES,
+  PHARMACY_PREFERENCES,
   getActiveConditionName,
 } from "../fixtures/test-data";
 import { getOutcome, getOutcomeConfig } from "../fixtures/outcome-config";
@@ -20,7 +20,8 @@ import { getOutcome, getOutcomeConfig } from "../fixtures/outcome-config";
 // picking an outcome shouldn't require also remembering which user it needs.
 // For a direct (non-outcome) run, PDS_USER_MODE (dashboard Test Data toggle,
 // or PDS_USER_MODE env var override) picks the identity instead.
-const activeSlugForOutcome = process.env.CONDITION_SLUG || getActiveConditionName();
+const activeSlugForOutcome =
+  process.env.CONDITION_SLUG || getActiveConditionName();
 const requestedOutcomeId = process.env.OUTCOME_ID;
 const requestedOutcome = requestedOutcomeId
   ? getOutcome(activeSlugForOutcome, requestedOutcomeId)
@@ -219,8 +220,6 @@ async function detectCurrentStep(page: Page): Promise<JourneyStep> {
     return "product_signup";
   }
 
-
-
   // 9. Continue-as-guest step (must be before signup detection)
   const guestContinueIndicators = [
     'button:has-text("Continue as Guest")',
@@ -320,8 +319,8 @@ async function logJourneyFlowOnce(
 
         const labels: string[] = [];
         for (const child of children) {
-          const circle = Array.from(child.querySelectorAll("div")).find(
-            (d) => /^\d+$/.test((d.textContent ?? "").trim()),
+          const circle = Array.from(child.querySelectorAll("div")).find((d) =>
+            /^\d+$/.test((d.textContent ?? "").trim()),
           );
           const label = child.querySelector("span");
           const labelText = (label?.textContent ?? "").trim();
@@ -359,9 +358,15 @@ async function diagnoseIncompleteJourney(page: Page): Promise<string> {
     ':text("3dsecure.io")',
   ];
   for (const sel of paymentIndicators) {
-    if (await page.locator(sel).first().isVisible({ timeout: 300 }).catch(() => false)) {
+    if (
+      await page
+        .locator(sel)
+        .first()
+        .isVisible({ timeout: 300 })
+        .catch(() => false)
+    ) {
       return (
-        "Reached the payment step (\"Complete your payment\") — this requires " +
+        'Reached the payment step ("Complete your payment") — this requires ' +
         "entering a real card and completing 3D-Secure, which automation " +
         "cannot do. This is an expected stopping point for paid conditions, " +
         "not a bug in the automation."
@@ -370,7 +375,9 @@ async function diagnoseIncompleteJourney(page: Page): Promise<string> {
   }
 
   const alreadyBookedVisible = await page
-    .locator(':text("Appointment slot is booked already"), :text("slot is already booked")')
+    .locator(
+      ':text("Appointment slot is booked already"), :text("slot is already booked")',
+    )
     .first()
     .isVisible({ timeout: 300 })
     .catch(() => false);
@@ -406,7 +413,10 @@ async function detectOutcomeScreen(
   const config = getOutcomeConfig(slug);
   if (!config) return null;
 
-  const bodyText = await page.locator("body").innerText().catch(() => "");
+  const bodyText = await page
+    .locator("body")
+    .innerText()
+    .catch(() => "");
   for (const outcome of config.outcomes) {
     if (outcome.detectPatterns.some((p) => p.test(bodyText))) {
       return { id: outcome.id, label: outcome.label };
@@ -424,22 +434,29 @@ async function detectOutcomeScreen(
  * plain JSON body instead (`{ answer_detail: [{ question_detail_id, answer }] }`)
  * is also supported, so this isn't tied to one pharmacy's API shape.
  */
-function parseSubmittedAnswers(body: string | Record<string, unknown>): { id: string; answer: string }[] {
+function parseSubmittedAnswers(
+  body: string | Record<string, unknown>,
+): { id: string; answer: string }[] {
   if (typeof body === "object" && body !== null) {
     const list = (body as any).answer_detail;
     if (!Array.isArray(list)) return [];
     return list
       .filter((a: any) => a && a.question_detail_id != null && a.answer != null)
-      .map((a: any) => ({ id: String(a.question_detail_id), answer: String(a.answer).split("®")[0].trim() }));
+      .map((a: any) => ({
+        id: String(a.question_detail_id),
+        answer: String(a.answer).split("®")[0].trim(),
+      }));
   }
 
   const ids: Record<string, string> = {};
-  const idRe = /name="answer_detail\[(\d+)\]\[question_detail_id\]"\r?\n\r?\n(\d+)/g;
+  const idRe =
+    /name="answer_detail\[(\d+)\]\[question_detail_id\]"\r?\n\r?\n(\d+)/g;
   let m: RegExpExecArray | null;
   while ((m = idRe.exec(body))) ids[m[1]] = m[2];
 
   const answers: Record<string, string> = {};
-  const ansRe = /name="answer_detail\[(\d+)\]\[answer\]"\r?\n\r?\n([\s\S]*?)\r?\n------/g;
+  const ansRe =
+    /name="answer_detail\[(\d+)\]\[answer\]"\r?\n\r?\n([\s\S]*?)\r?\n------/g;
   while ((m = ansRe.exec(body))) answers[m[1]] = m[2].split("®")[0].trim();
 
   return Object.keys(ids)
@@ -466,10 +483,15 @@ function decodeHtmlEntities(text: string): string {
     .replace(/&gt;/g, ">");
 }
 
-function collectQuestionTitles(details: any[] | undefined, out: Record<string, string> = {}): Record<string, string> {
+function collectQuestionTitles(
+  details: any[] | undefined,
+  out: Record<string, string> = {},
+): Record<string, string> {
   for (const q of details || []) {
     if (q?.id != null) {
-      out[String(q.id)] = decodeHtmlEntities(String(q.title || "").replace(/<[^>]+>/g, ""))
+      out[String(q.id)] = decodeHtmlEntities(
+        String(q.title || "").replace(/<[^>]+>/g, ""),
+      )
         .replace(/\s+/g, " ")
         .trim();
     }
@@ -479,7 +501,10 @@ function collectQuestionTitles(details: any[] | undefined, out: Record<string, s
 }
 
 function normalizeForMatch(text: string): string {
-  return text.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
 }
 
 /**
@@ -499,7 +524,9 @@ function normalizeForMatch(text: string): string {
  * spec (a run whose questionnaire has a file upload, where the submit
  * request body is unrecoverable).
  */
-function dedupeFilledAnswers(rawFilledAnswers: { question: string; answer: string }[]) {
+function dedupeFilledAnswers(
+  rawFilledAnswers: { question: string; answer: string }[],
+) {
   const seen = new Set<string>();
   return rawFilledAnswers.filter((f) => {
     const key = `${normalizeForMatch(f.question)} ${normalizeForMatch(f.answer)}`;
@@ -511,14 +538,18 @@ function dedupeFilledAnswers(rawFilledAnswers: { question: string; answer: strin
 
 function buildQaComparison(
   rawFilledAnswers: { question: string; answer: string }[],
-  submissions: { requestBody: string | Record<string, unknown>; responseBody: any }[],
+  submissions: {
+    requestBody: string | Record<string, unknown>;
+    responseBody: any;
+  }[],
 ) {
   const filledAnswers = dedupeFilledAnswers(rawFilledAnswers);
 
   const submitted: { question: string; answer: string }[] = [];
   for (const { requestBody, responseBody } of submissions) {
     const titles = collectQuestionTitles(
-      responseBody?.data?.questionnaire?.questionnaire_template?.question_details,
+      responseBody?.data?.questionnaire?.questionnaire_template
+        ?.question_details,
     );
     for (const { id, answer } of parseSubmittedAnswers(requestBody)) {
       submitted.push({ question: titles[id] || `Question #${id}`, answer });
@@ -535,7 +566,11 @@ function buildQaComparison(
   // significant words (4+ letters, skips small connector words) sidesteps
   // that entirely.
   const significantWords = (text: string) =>
-    new Set(normalizeForMatch(text).split(" ").filter((w) => w.length >= 4));
+    new Set(
+      normalizeForMatch(text)
+        .split(" ")
+        .filter((w) => w.length >= 4),
+    );
 
   // ROOT CAUSE (real data: "Weight" — a 1-word filled question — falsely
   // matched a long, unrelated "This optional questionnaire asks about
@@ -567,13 +602,16 @@ function buildQaComparison(
         bestIdx = idx;
       }
     });
-    const match = bestOverlap >= 0.7 && bestIdx >= 0 ? filledAnswers[bestIdx] : null;
+    const match =
+      bestOverlap >= 0.7 && bestIdx >= 0 ? filledAnswers[bestIdx] : null;
     if (match) usedFilledIdx.add(bestIdx);
     return {
       question: s.question,
       filledAnswer: match?.answer ?? null,
       submittedAnswer: s.answer,
-      matched: !!match && normalizeForMatch(match.answer) === normalizeForMatch(s.answer),
+      matched:
+        !!match &&
+        normalizeForMatch(match.answer) === normalizeForMatch(s.answer),
     };
   });
 
@@ -592,9 +630,9 @@ test.describe("Conditions flow", () => {
     page,
     baseURL,
   }) => {
-//     page.on("console", (msg) => {
-//       console.log(`[browser ${msg.type()}] ${msg.text()}`);
-//     });
+    //     page.on("console", (msg) => {
+    //       console.log(`[browser ${msg.type()}] ${msg.text()}`);
+    //     });
     page.on("pageerror", (err) => {
       console.log(`[page error] ${err.message}`);
     });
@@ -609,13 +647,18 @@ test.describe("Conditions flow", () => {
     const conditionSlug =
       process.env.CONDITION_SLUG || getActiveConditionName();
     const iterationNumber = parseInt(process.env.ITERATION_NUMBER || "1", 10);
-    const conditionLabel =
-      process.env.CONDITION_LABEL || conditionSlug;
+    const conditionLabel = process.env.CONDITION_LABEL || conditionSlug;
 
     // Track API calls by intercepting request/response pairs
     const pendingRequests = new Map<
       string,
-      { method: string; url: string; headers: Record<string, string>; body: string | null; startTime: number }
+      {
+        method: string;
+        url: string;
+        headers: Record<string, string>;
+        body: string | null;
+        startTime: number;
+      }
     >();
 
     // Every submit_questionnaire request/response this run made — the
@@ -623,7 +666,10 @@ test.describe("Conditions flow", () => {
     // against questionnaire.filledAnswers ("what we clicked") once the
     // journey finishes. Multi-step questionnaires (e.g. Weight Management)
     // submit once per template, so this can have more than one entry.
-    const questionnaireSubmissions: { requestBody: string | Record<string, unknown>; responseBody: any }[] = [];
+    const questionnaireSubmissions: {
+      requestBody: string | Record<string, unknown>;
+      responseBody: any;
+    }[] = [];
 
     // ROOT CAUSE (Q&A Verification only ever worked on Kepple Lane): the
     // whitelist below existed for the dashboard's own API-call tracking
@@ -655,9 +701,9 @@ test.describe("Conditions flow", () => {
         "pds_search_patients",
         "users/sign_up.json",
         "submit_questionnaire",
-        "create_preconsult"
+        "create_preconsult",
       ];
-      if (whitelist.some(endpoint => url.includes(endpoint))) {
+      if (whitelist.some((endpoint) => url.includes(endpoint))) {
         pendingRequests.set(req.url() + req.method(), {
           method: req.method(),
           url: req.url(),
@@ -671,17 +717,21 @@ test.describe("Conditions flow", () => {
           // reinterpretation) keeps the multipart boundary/field lines
           // readable as text even with an opaque binary chunk embedded
           // between them, which is all parseSubmittedAnswers() needs.
-          body: req.postData() || req.postDataBuffer()?.toString("latin1") || null,
+          body:
+            req.postData() || req.postDataBuffer()?.toString("latin1") || null,
           startTime: Date.now(),
         });
       } else if (["POST", "PUT", "PATCH"].includes(req.method())) {
-        const body = req.postData() || req.postDataBuffer()?.toString("latin1") || null;
+        const body =
+          req.postData() || req.postDataBuffer()?.toString("latin1") || null;
         pendingPostBodies.set(req.url() + req.method(), {
           body,
           startTime: Date.now(),
         });
         if (process.env.DEBUG_QUESTIONS === "1") {
-          console.log(`[DIAG] non-whitelisted ${req.method()}: ${url} bodyPreview=${(body || "").slice(0, 3000)}`);
+          console.log(
+            `[DIAG] non-whitelisted ${req.method()}: ${url} bodyPreview=${(body || "").slice(0, 3000)}`,
+          );
         }
       }
     });
@@ -731,9 +781,15 @@ test.describe("Conditions flow", () => {
             responseBody: genericResponseBody,
           });
           if (process.env.DEBUG_QUESTIONS === "1") {
-            console.log(`[DEBUG_QUESTIONS] dynamically-detected questionnaire submission at ${req.url()}`);
-            console.log(`[DEBUG_QUESTIONS] requestBody: ${JSON.stringify(genericRequestBody).slice(0, 4000)}`);
-            console.log(`[DEBUG_QUESTIONS] responseBody: ${JSON.stringify(genericResponseBody).slice(0, 6000)}`);
+            console.log(
+              `[DEBUG_QUESTIONS] dynamically-detected questionnaire submission at ${req.url()}`,
+            );
+            console.log(
+              `[DEBUG_QUESTIONS] requestBody: ${JSON.stringify(genericRequestBody).slice(0, 4000)}`,
+            );
+            console.log(
+              `[DEBUG_QUESTIONS] responseBody: ${JSON.stringify(genericResponseBody).slice(0, 6000)}`,
+            );
           }
         }
       }
@@ -752,10 +808,7 @@ test.describe("Conditions flow", () => {
 
       try {
         const contentType = responseHeaders["content-type"] || "";
-        if (
-          contentType.includes("json") ||
-          contentType.includes("text")
-        ) {
+        if (contentType.includes("json") || contentType.includes("text")) {
           const text = await res.text().catch(() => "");
           if (text) {
             try {
@@ -777,13 +830,22 @@ test.describe("Conditions flow", () => {
       }
 
       if (
-        (pending.url.includes("submit_questionnaire") || looksLikeQuestionnaireSubmission(pending.body)) &&
-        (typeof requestBody === "string" || (requestBody && typeof requestBody === "object"))
+        (pending.url.includes("submit_questionnaire") ||
+          looksLikeQuestionnaireSubmission(pending.body)) &&
+        (typeof requestBody === "string" ||
+          (requestBody && typeof requestBody === "object"))
       ) {
-        questionnaireSubmissions.push({ requestBody: requestBody as string | Record<string, unknown>, responseBody });
+        questionnaireSubmissions.push({
+          requestBody: requestBody as string | Record<string, unknown>,
+          responseBody,
+        });
         if (process.env.DEBUG_QUESTIONS === "1") {
-          console.log(`[DEBUG_QUESTIONS] submit_questionnaire requestBody: ${JSON.stringify(requestBody).slice(0, 4000)}`);
-          console.log(`[DEBUG_QUESTIONS] submit_questionnaire responseBody: ${JSON.stringify(responseBody).slice(0, 6000)}`);
+          console.log(
+            `[DEBUG_QUESTIONS] submit_questionnaire requestBody: ${JSON.stringify(requestBody).slice(0, 4000)}`,
+          );
+          console.log(
+            `[DEBUG_QUESTIONS] submit_questionnaire responseBody: ${JSON.stringify(responseBody).slice(0, 6000)}`,
+          );
         }
       }
 
@@ -1006,8 +1068,6 @@ test.describe("Conditions flow", () => {
             step = await detectCurrentStep(page);
           }
 
-
-
           if (step === "unknown") {
             console.log(`⚠ Unknown step at URL: ${page.url()} — stopping loop`);
             break;
@@ -1034,15 +1094,15 @@ test.describe("Conditions flow", () => {
           case "product_signup": {
             console.log("→ Handling product signup step");
             await productSignup.completeProductSignupFlow({
-              firstName: TEST_USER.firstName,
-              lastName: TEST_USER.lastName,
-              postcode: TEST_USER.postcode,
-              gender: TEST_USER.gender,
-              dobIso: TEST_USER.dob.iso,
-              phone: TEST_USER.phone,
-              email: TEST_USER.email,
-              password: TEST_USER.password,
-              confirmPassword: TEST_USER.confirmPassword,
+              firstName: PDS_LOOKUP_USER.firstName,
+              lastName: PDS_LOOKUP_USER.lastName,
+              postcode: PDS_LOOKUP_USER.postcode,
+              gender: PDS_LOOKUP_USER.gender,
+              dobIso: PDS_LOOKUP_USER.dob.iso,
+              phone: PDS_LOOKUP_USER.phone,
+              email: PDS_LOOKUP_USER.email,
+              password: PDS_LOOKUP_USER.password,
+              confirmPassword: PDS_LOOKUP_USER.confirmPassword,
             });
             break;
           }
@@ -1064,19 +1124,34 @@ test.describe("Conditions flow", () => {
               );
               process.env.OUTCOME_ID = "gateway";
               questionnaire.resetForRestart();
-              // Start from a clean session so the site doesn't carry the
-              // first pass's answers/result into the restart -- only the
-              // pharmacy-selection cookie is put back.
-              const restartOrigin = new URL(page.url()).origin;
-              await page.context().clearCookies();
-              if (pharmacySlug) {
-                await page.context().addCookies([
-                  { name: "selected-corporate-id", value: pharmacySlug, url: restartOrigin },
-                ]);
-              }
-              await page.evaluate(() => {
-                try { localStorage.clear(); sessionStorage.clear(); } catch { /* opaque origin */ }
-              }).catch(() => {});
+              // ROOT CAUSE FIX (confirmed live -- every Kepple Lane outcome
+              // run that reached this restart hit "[HTTP 500]" on the very
+              // next navigation): this used to clearCookies() (wiping the
+              // "selected-corporate-id" pharmacy-selection cookie the SSR
+              // page needs to render at all) and only restore it when
+              // `pharmacySlug` was truthy -- but Kepple Lane's own
+              // `pharmacySlug` is "" (confirmed live: "✔ Pharmacy slug: "
+              // prints blank for it), so the cookie was cleared and NEVER
+              // put back, and the reload 500'd. A plain reload already
+              // starts a fresh questionnaire server-side (a new
+              // patient_answer_id, same as the test's own first visit to
+              // this URL) without needing to touch cookies/storage at all.
+              //
+              // ROOT CAUSE FIX (confirmed live -- the Q&A verification
+              // table showed duplicate question rows, e.g. "Do you have
+              // these symptoms?" appearing twice, with one copy always
+              // "(no match)"): questionnaireSubmissions accumulates every
+              // submit_questionnaire response for the WHOLE test run, but
+              // this restart abandons the first pass's questionnaire
+              // instance entirely and answers everything fresh on the
+              // second. Its submissions are leftovers from a questionnaire
+              // attempt that never completed, not errors -- recordAnswer()
+              // already keeps only the LATEST filled value per question, so
+              // comparing it against the FIRST pass's now-superseded
+              // submission is comparing against the wrong attempt. Clear
+              // here so the table only reflects the pass that actually
+              // finished.
+              questionnaireSubmissions.length = 0;
               await page.goto(conditionHref);
               await detailPage.waitForDetailPage();
               await detailPage.clickStartAssessment();
@@ -1106,15 +1181,15 @@ test.describe("Conditions flow", () => {
 
             const handledDynamicCheckoutSignup =
               await signup.completeDynamicCheckoutSignupIfVisible({
-                firstName: TEST_USER.firstName,
-                lastName: TEST_USER.lastName,
-                postcode: TEST_USER.postcode,
-                gender: TEST_USER.gender,
-                dobIso: TEST_USER.dob.iso,
-                phone: TEST_USER.phone,
-                email: TEST_USER.email,
-                password: TEST_USER.password,
-                confirmPassword: TEST_USER.confirmPassword,
+                firstName: PDS_LOOKUP_USER.firstName,
+                lastName: PDS_LOOKUP_USER.lastName,
+                postcode: PDS_LOOKUP_USER.postcode,
+                gender: PDS_LOOKUP_USER.gender,
+                dobIso: PDS_LOOKUP_USER.dob.iso,
+                phone: PDS_LOOKUP_USER.phone,
+                email: PDS_LOOKUP_USER.email,
+                password: PDS_LOOKUP_USER.password,
+                confirmPassword: PDS_LOOKUP_USER.confirmPassword,
               });
             console.log(
               `[spec] handledDynamicCheckoutSignup=${handledDynamicCheckoutSignup}`,
@@ -1179,7 +1254,10 @@ test.describe("Conditions flow", () => {
               .catch(() => false);
 
             if (hasEmail) {
-              await signup.fillContactDetails(TEST_USER.email, TEST_USER.phone);
+              await signup.fillContactDetails(
+                PDS_LOOKUP_USER.email,
+                PDS_LOOKUP_USER.phone,
+              );
               await signup.submitAndBook();
               await page.waitForTimeout(3_000);
             }
@@ -1233,8 +1311,6 @@ test.describe("Conditions flow", () => {
             flowCompleted = true;
             break;
           }
-
-
         }
       }
     });
@@ -1244,9 +1320,14 @@ test.describe("Conditions flow", () => {
     // automation actually clicked/typed against what the submit_questionnaire
     // API call really sent to the server — the ground truth, not a scrape of
     // a review screen (most conditions don't have one).
-    if (questionnaireSubmissions.length > 0 || questionnaire.filledAnswers.length > 0) {
+    if (
+      questionnaireSubmissions.length > 0 ||
+      questionnaire.filledAnswers.length > 0
+    ) {
       if (process.env.DEBUG_QUESTIONS === "1") {
-        console.log(`[DEBUG_QUESTIONS] filledAnswers: ${JSON.stringify(questionnaire.filledAnswers)}`);
+        console.log(
+          `[DEBUG_QUESTIONS] filledAnswers: ${JSON.stringify(questionnaire.filledAnswers)}`,
+        );
       }
       // Some questionnaires (e.g. "All Test Question") include a file
       // upload — when a request body contains a File/Blob, Chromium's
@@ -1259,7 +1340,10 @@ test.describe("Conditions flow", () => {
       // "submitted" side marked unverified instead of a false mismatch.
       const comparison =
         questionnaireSubmissions.length > 0
-          ? buildQaComparison(questionnaire.filledAnswers, questionnaireSubmissions)
+          ? buildQaComparison(
+              questionnaire.filledAnswers,
+              questionnaireSubmissions,
+            )
           : (() => {
               const deduped = dedupeFilledAnswers(questionnaire.filledAnswers);
               return {
@@ -1284,7 +1368,8 @@ test.describe("Conditions flow", () => {
       // ASCII-art version is redundant there (would show twice) and is only
       // useful for plain `npx playwright test` runs with no dashboard.
       if (!process.env.RUN_VIA_DASHBOARD) {
-        const truncate = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
+        const truncate = (s: string, n: number) =>
+          s.length > n ? s.slice(0, n - 1) + "…" : s;
         const summaryLine = `Filled       Submitted       Matched`;
         const summaryValues = `  ${comparison.totalFilled}              ${comparison.totalSubmitted}             ${comparison.matchedCount}/${comparison.totalSubmitted}`;
 
@@ -1299,7 +1384,11 @@ test.describe("Conditions flow", () => {
         console.log("Question | Filled Answer | Submitted Answer | Status");
         console.log("------------------------------------------------------");
         comparison.rows.forEach((row: any, i) => {
-          const status = row.unverified ? "UNVERIFIED" : row.matched ? "MATCH" : "MISMATCH";
+          const status = row.unverified
+            ? "UNVERIFIED"
+            : row.matched
+              ? "MATCH"
+              : "MISMATCH";
           console.log(
             `Q${i + 1}       | ${truncate(row.filledAnswer ?? "(no match)", 30)} | ${truncate(row.submittedAnswer ?? "(unavailable)", 30)} | ${status}`,
           );
@@ -1313,7 +1402,9 @@ test.describe("Conditions flow", () => {
             console.log(`Question: ${truncate(row.question, 200)}`);
             console.log("");
             console.log(`Filled:`);
-            console.log(row.filledAnswer ?? "(no matching filled answer found)");
+            console.log(
+              row.filledAnswer ?? "(no matching filled answer found)",
+            );
             console.log("");
             console.log(`Submitted:`);
             console.log(row.submittedAnswer);
@@ -1334,7 +1425,8 @@ test.describe("Conditions flow", () => {
         else process.env.OUTCOME_ID = originalOutcomeEnv;
         // The second (gateway) pass may have overwritten this; the outcome
         // under test is the one the first pass actually reached.
-        if (firstReachedOutcome) questionnaire.reachedOutcome = firstReachedOutcome;
+        if (firstReachedOutcome)
+          questionnaire.reachedOutcome = firstReachedOutcome;
       }
       if (requestedOutcomeId) {
         // Outcome-specific run: success means landing on the SELECTED
@@ -1400,16 +1492,24 @@ test.describe("Conditions flow", () => {
         );
 
         // Check if pre-consultation questionnaire button is available on the confirmation page
-        const preConsultBtn = page.locator('button:has-text("Complete pre-consultation questionnaire")');
-        if (await preConsultBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
-          console.log("Found 'Complete pre-consultation questionnaire' button. Clicking it to open questionnaire UI...");
+        const preConsultBtn = page.locator(
+          'button:has-text("Complete pre-consultation questionnaire")',
+        );
+        if (
+          await preConsultBtn.isVisible({ timeout: 5000 }).catch(() => false)
+        ) {
+          console.log(
+            "Found 'Complete pre-consultation questionnaire' button. Clicking it to open questionnaire UI...",
+          );
           await preConsultBtn.click();
-          
+
           console.log("Answering pre-consultation questionnaire...");
           await questionnaire.waitForPage();
           await questionnaire.answerAllQuestions();
-          console.log("✔ Pre-consultation questionnaire completed successfully!");
-          
+          console.log(
+            "✔ Pre-consultation questionnaire completed successfully!",
+          );
+
           console.log("Waiting for the Thank-you page to appear...");
           let thankYouVisible = false;
           for (let i = 0; i < 150; i++) {
@@ -1419,12 +1519,16 @@ test.describe("Conditions flow", () => {
             }
             await page.waitForTimeout(200);
           }
-          
+
           if (thankYouVisible) {
-            console.log("✔ Thank-you page detected! Test completed successfully.");
+            console.log(
+              "✔ Thank-you page detected! Test completed successfully.",
+            );
             await thankYou.handleThankYou(THANK_YOU_PREFERENCES);
           } else {
-            console.log("⚠️ Questionnaire submitted but Thank-you page was not detected within timeout.");
+            console.log(
+              "⚠️ Questionnaire submitted but Thank-you page was not detected within timeout.",
+            );
           }
         }
       }
