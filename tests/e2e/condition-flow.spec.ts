@@ -401,6 +401,46 @@ async function diagnoseIncompleteJourney(page: Page): Promise<string> {
 }
 
 /**
+ * Looks up this condition's "Review Screen" toggle directly from its
+ * Sanity CMS document (field: isReviewScreenVisible) -- this pharmacy
+ * platform's own per-condition config backend, discovered the same way
+ * dashboard.js's /api/sanity-conditions route does: fetch the site's own
+ * HTML (the project id/dataset are embedded in its Next.js RSC payload as
+ * escaped JSON -- `.replace(/\\/g, "")` un-escapes it to plain
+ * `"projectId":"..."` text) and query that project directly. Returns null
+ * (treated as "unknown -- show the table as before") on any failure, so a
+ * pharmacy this can't resolve for never loses its existing output.
+ */
+async function fetchReviewScreenVisible(
+  baseURL: string | undefined,
+  slug: string,
+): Promise<boolean | null> {
+  if (!baseURL) return null;
+  try {
+    const origin = new URL(baseURL).origin;
+    const html = await fetch(`${origin}/conditions/${slug}`, {
+      signal: AbortSignal.timeout(10_000),
+    }).then((r) => r.text());
+    const clean = html.replace(/\\/g, "");
+    const projectId = clean.match(/projectId"\s*:\s*"([a-zA-Z0-9]+)"/)?.[1];
+    const dataset = clean.match(/dataset"\s*:\s*"([a-zA-Z0-9_-]+)"/)?.[1];
+    if (!projectId || !dataset) return null;
+
+    const query = `*[_type == "singleCondition" && conditionSlug.current == "${slug}"][0]{isReviewScreenVisible}`;
+    const sanityUrl =
+      `https://${projectId}.api.sanity.io/v2023-01-01/data/query/${dataset}` +
+      `?query=${encodeURIComponent(query)}&perspective=drafts`;
+    const json = await fetch(sanityUrl, {
+      signal: AbortSignal.timeout(10_000),
+    }).then((r) => r.json());
+    const flag = json?.result?.isReviewScreenVisible;
+    return typeof flag === "boolean" ? flag : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Matches the final screen's visible text against the active condition's
  * configured outcome patterns (outcome-config.ts) to determine which
  * outcome actually rendered. Returns null if the condition has no outcome
@@ -660,6 +700,29 @@ test.describe("Conditions flow", () => {
         startTime: number;
       }
     >();
+
+    // Per-condition "Review Screen" toggle (confirmed live via the actual
+    // admin config UI, J Morris Pharmacy · Sinusitis). ROOT CAUSE (tried
+    // first, didn't work): the backend's own
+    // GET .../api/booking/corporate-info?token=... DOES carry this flag,
+    // but its response body is AES-encrypted on the wire
+    // ("data":"U2FsdGVkX1..." -- the standard CryptoJS/OpenSSL
+    // "Salted__" blob signature) and only decrypted client-side in the
+    // browser's own JS -- Playwright's response listener only ever sees
+    // ciphertext, confirmed live (see git history for the probe). The
+    // flag is NOT encrypted at its real source, though: it's a plain field
+    // on the condition's own Sanity CMS document (confirmed live:
+    // isReviewScreenVisible: false for this exact condition), which is
+    // what fetchReviewScreenVisible() below queries directly instead.
+    let reviewScreenVisible = await fetchReviewScreenVisible(
+      baseURL,
+      conditionSlug,
+    );
+    if (process.env.DEBUG_QUESTIONS === "1") {
+      console.log(
+        `[DEBUG_QUESTIONS] isReviewScreenVisible (Sanity) for "${conditionSlug}": ${reviewScreenVisible}`,
+      );
+    }
 
     // Every submit_questionnaire request/response this run made — the
     // ground truth for "what actually got sent to the server", compared
@@ -1116,7 +1179,29 @@ test.describe("Conditions flow", () => {
             // valid, successful outcome — a pharmacist reviews the answers
             // instead of a booking being made — so count it as completed
             // rather than failing the run for never reaching a booking.
-            if (questionnaire.endedWithoutBooking && !restartedAfterOutcome) {
+            //
+            // ROOT CAUSE FIX (confirmed live -- a plain run of Sinusitis
+            // on J Morris Pharmacy filled the ENTIRE questionnaire twice,
+            // reaching the identical "Unknown outcome screen" both times,
+            // for no benefit): this restart exists so an OUTCOME-SPECIFIC
+            // run (OUTCOME_ID set, e.g. self_care/immediate_action on
+            // Shingles) can ALSO confirm the normal gateway/booking path
+            // still works after recording the rejection outcome it was
+            // actually asked to verify -- that's the only scenario where
+            // retrying with different ("gateway") answers could plausibly
+            // reach a DIFFERENT result. A plain run (no OUTCOME_ID) isn't
+            // verifying any specific rejection branch in the first place;
+            // whatever the site naturally does with its own default
+            // answers IS the thing being tested, so if that's a genuine
+            // no-booking terminal screen, retrying just re-answers the
+            // same questionnaire a second time and -- for any condition
+            // whose every path ends in pharmacist review, not just
+            // Shingles' NHS 111 -- reaches the exact same screen again.
+            if (
+              questionnaire.endedWithoutBooking &&
+              !restartedAfterOutcome &&
+              requestedOutcomeId
+            ) {
               restartedAfterOutcome = true;
               firstReachedOutcome = questionnaire.reachedOutcome;
               console.log(
@@ -1320,9 +1405,16 @@ test.describe("Conditions flow", () => {
     // automation actually clicked/typed against what the submit_questionnaire
     // API call really sent to the server — the ground truth, not a scrape of
     // a review screen (most conditions don't have one).
+    //
+    // reviewScreenVisible === false means this pharmacy has explicitly
+    // turned the Review Screen off for this condition (captured above from
+    // corporate-info's own is_review_screen_visible) — skip the table
+    // entirely in that case, per explicit request. Anything else (true, or
+    // null if that API was never seen) keeps the existing behavior.
     if (
-      questionnaireSubmissions.length > 0 ||
-      questionnaire.filledAnswers.length > 0
+      reviewScreenVisible !== false &&
+      (questionnaireSubmissions.length > 0 ||
+        questionnaire.filledAnswers.length > 0)
     ) {
       if (process.env.DEBUG_QUESTIONS === "1") {
         console.log(
