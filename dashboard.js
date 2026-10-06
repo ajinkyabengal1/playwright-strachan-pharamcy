@@ -240,6 +240,17 @@ const CONDITION_OUTCOMES = [
       { id: "immediate_action", label: "Immediate Action", userType: "non_pds" },
     ],
   },
+  {
+    // Kepple Lane, real slug "weight-management-weight-loss-treatment-
+    // private" -- a DIFFERENT condition from "weight-management-private"
+    // above (see outcome-config.ts).
+    slug: "weight-management-weight-loss-treatment-private",
+    gateway: "private",
+    outcomes: [
+      { id: "self_care", label: "Self Care", userType: "non_pds" },
+      // { id: "gp_referral", label: "GP Referral", userType: "non_pds" }, // disabled per explicit request
+    ],
+  },
 ];
 
 function getConditionOutcomes(slug) {

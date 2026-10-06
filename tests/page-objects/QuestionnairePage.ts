@@ -3245,6 +3245,7 @@ export class QuestionnairePage {
         // outer loop, this newly-revealed question had already been
         // generically answered AND submitted. Rule-based answers must win
         // this race, so try them first on every attempt here too.
+        if (process.env.DEBUG_QUESTIONS === "1") await this.debugDumpVisibleQuestions();
         if (process.env.DEBUG_QUESTIONS === "1") console.log(`[DIAG] attempt ${attempt}: before answerByConditionRules`);
         await this.answerByConditionRules().catch(() => false);
         if (process.env.DEBUG_QUESTIONS === "1") console.log(`[DIAG] attempt ${attempt}: before fillAllVisibleQuestions`);

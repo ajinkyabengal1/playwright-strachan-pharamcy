@@ -1,5 +1,5 @@
 export const TEST_USER = {
-  gender: "male" as "male" | "female",
+  gender: "female" as "male" | "female",
   dob: {
     day: "15",
     month: "04",
@@ -9,7 +9,7 @@ export const TEST_USER = {
     /** Display format: DD/MM/YYYY */
     display: "15/04/1962",
   },
-  firstName: "Lloyd",
+  firstName: "laila",
   lastName: "PEENEY",
   postcode: "HD59LT",
   genderValue: "male",

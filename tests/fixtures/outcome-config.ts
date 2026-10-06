@@ -171,6 +171,54 @@ export const CONDITION_OUTCOMES: ConditionOutcomeConfig[] = [
       },
     ],
   },
+  {
+    // Kepple Lane, real slug "weight-management-weight-loss-treatment-
+    // private" -- a DIFFERENT condition from "weight-management-private"
+    // (see ConditionQuestionnaireRules.ts's own comment on
+    // WEIGHT_MANAGEMENT_WLT_RULES_SELF_CARE). Q1 ("Do you take any
+    // medications currently...") is the deciding question -- "No" is
+    // CONFIRMED LIVE via the submit_questionnaire API response to score
+    // this template's entire formula to {title:"Not qualified",
+    // pre_consult_outcome:"SelfCare"}.
+    //
+    // ROOT CAUSE (confirmed live, checked directly in the API response):
+    // this formula bucket's own "block_appointment_booking" field is null,
+    // not true -- the backend tags the submission "SelfCare" for clinician
+    // review but does NOT instruct the frontend to block the booking flow,
+    // which is exactly why the journey continues straight through to
+    // patient-info/NHS-check/booking regardless of this answer, with no
+    // distinct on-screen block to detect. detectPatterns below are a
+    // best-guess placeholder (API title text) pending a real screen to
+    // match -- but per this field, there currently ISN'T one: re-verify
+    // "block_appointment_booking":true appears on this bucket in a fresh
+    // API response before trusting that a Self Care screen will actually
+    // show.
+    slug: "weight-management-weight-loss-treatment-private",
+    gateway: "private",
+    outcomes: [
+      {
+        id: "self_care",
+        label: "Self Care",
+        userType: "non_pds",
+        detectPatterns: [/not\s+qualified/i],
+      },
+      // Disabled per explicit request (kept for reference — CONFIRMED LIVE
+      // via the submit_questionnaire API response, 2nd questionnaire,
+      // template id 1255: Q2 "None of the above" scores this template's
+      // "Q1+Q2" formula to {title:"Sorry, see your usual GP",
+      // pre_consult_outcome:"GP Referral"} — see
+      // ConditionQuestionnaireRules.ts's own disabled
+      // WEIGHT_MANAGEMENT_WLT_RULES_GP_REFERRAL comment. Same root cause as
+      // self_care above: this bucket's "block_appointment_booking" field is
+      // ALSO null, not true.
+      // {
+      //   id: "gp_referral",
+      //   label: "GP Referral",
+      //   userType: "non_pds",
+      //   detectPatterns: [/sorry,?\s*see your usual gp/i],
+      // },
+    ],
+  },
 ];
 
 export function getOutcomeConfig(slug: string): ConditionOutcomeConfig | undefined {

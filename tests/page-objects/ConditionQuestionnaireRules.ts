@@ -547,6 +547,43 @@ export const CHOLERA_RULES_IMMEDIATE_ACTION: ConditionQuestionRule[] = [
   ...CHOLERA_RULES_COMMON,
 ];
 
+/**
+ * Weight Management (Weight Loss Treatment) — Kepple Lane, real slug
+ * "weight-management-weight-loss-treatment-private". A DIFFERENT condition
+ * from "weight-management-private" above (different tenant, different
+ * questionnaire template) — do not merge the two.
+ *
+ * CONFIRMED LIVE via the submit_questionnaire API response itself (template
+ * "1.0 Weight Management PGD - LIVE", id 1254): Q1 is the template's entire
+ * formula ("F", question_ids [4819]) — "No" (value 0) scores 0, which maps
+ * to formula_info {min_value:0, max_value:0, title:"Not qualified",
+ * pre_consult_outcome:"SelfCare"}; "Yes" (value 1) scores 1, which maps to
+ * {min_value:1, max_value:10, next_questionnaire:"2.0 Weight Management PGD
+ * - LIVE"} — i.e. continues to a second questionnaire instead of stopping.
+ */
+const WEIGHT_MGMT_WLT_Q1_MEDICATIONS =
+  /Do you take any medications currently, including over-the-counter, supplements, herbal remedies\?/i;
+
+export const WEIGHT_MANAGEMENT_WLT_RULES_SELF_CARE: ConditionQuestionRule[] = [
+  { questionPattern: WEIGHT_MGMT_WLT_Q1_MEDICATIONS, answerText: "No", control: "radio" },
+];
+
+// Disabled per explicit request (kept for reference — CONFIRMED LIVE via the
+// submit_questionnaire API response itself: Q1="Yes" continues to the 2nd
+// questionnaire (template "2.0 Weight Management PGD - LIVE", id 1255),
+// whose own formula is "Q1+Q2" (Q1 there is just an information_text
+// banner, not answerable) — Q2 "None of the above" scores 0, which maps to
+// formula_info {min_value:0, max_value:0, title:"Sorry, see your usual GP",
+// pre_consult_outcome:"GP Referral"}. Any actual symptom checked instead
+// scores 1-100, which continues to a 3rd questionnaire (id 1256) rather
+// than stopping here.
+// const WEIGHT_MGMT_WLT_Q2_SYMPTOMS =
+//   /Do you currently have any of these symptoms\?\s*\(Select all that apply\)/i;
+// export const WEIGHT_MANAGEMENT_WLT_RULES_GP_REFERRAL: ConditionQuestionRule[] = [
+//   { questionPattern: WEIGHT_MGMT_WLT_Q1_MEDICATIONS, answerText: "Yes", control: "radio" },
+//   { questionPattern: WEIGHT_MGMT_WLT_Q2_SYMPTOMS, answerText: "None of the above", control: "checkbox" },
+// ];
+
 export const OUTCOME_RULES: Record<string, Record<string, ConditionQuestionRule[]>> = {
   "shingles-herpes-zoster-nhs": {
     gateway: SHINGLES_RULES,
@@ -558,6 +595,10 @@ export const OUTCOME_RULES: Record<string, Record<string, ConditionQuestionRule[
   "weight-management-private": {
     gateway: WEIGHT_MANAGEMENT_RULES_GATEWAY,
     gp_referral: WEIGHT_MANAGEMENT_RULES_GP_REFERRAL,
+  },
+  "weight-management-weight-loss-treatment-private": {
+    self_care: WEIGHT_MANAGEMENT_WLT_RULES_SELF_CARE,
+    // gp_referral: WEIGHT_MANAGEMENT_WLT_RULES_GP_REFERRAL, // disabled per explicit request
   },
   "cholera-vaccination-r-nhs": {
     immediate_action: CHOLERA_RULES_IMMEDIATE_ACTION,
